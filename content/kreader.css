@@ -1,0 +1,414 @@
+/* KReader Zotero Plugin Styles */
+
+:root {
+  --kr-primary: #6366f1;
+  --kr-primary-light: rgba(99, 102, 241, 0.1);
+  --kr-success: #10b981;
+  --kr-danger: #ef4444;
+  --kr-text: #374151;
+  --kr-text-light: #9ca3af;
+  --kr-text-heading: #111827;
+  --kr-bg: #ffffff;
+  --kr-bg-card: #f9fafb;
+  --kr-border: #e5e7eb;
+  --kr-radius: 6px;
+  --kr-font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --kr-mono: "SF Mono", "Menlo", "Consolas", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --kr-text: #d1d5db;
+    --kr-text-light: #6b7280;
+    --kr-text-heading: #f3f4f6;
+    --kr-bg: #1f2937;
+    --kr-bg-card: #111827;
+    --kr-border: #374151;
+  }
+}
+
+/* ── Container ── */
+.kr-container {
+  font-family: var(--kr-font);
+  font-size: 13px;
+  color: var(--kr-text);
+  padding: 8px;
+  overflow: hidden;
+}
+
+.kr-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--kr-text-light);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.kr-error {
+  padding: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--kr-radius);
+  color: var(--kr-danger);
+  font-size: 13px;
+}
+
+/* ── Toolbar ── */
+.kr-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--kr-border);
+}
+
+.kr-view-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.kr-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius);
+  background: var(--kr-bg);
+  color: var(--kr-text);
+  font-size: 12px;
+  font-family: var(--kr-font);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.kr-btn:hover {
+  border-color: var(--kr-primary);
+  color: var(--kr-primary);
+}
+
+.kr-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.kr-btn-sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.kr-btn-primary {
+  background: var(--kr-primary);
+  border-color: var(--kr-primary);
+  color: white;
+}
+
+.kr-btn-primary:hover {
+  opacity: 0.9;
+  color: white;
+}
+
+.kr-btn-active {
+  background: var(--kr-primary-light);
+  border-color: var(--kr-primary);
+  color: var(--kr-primary);
+  font-weight: 600;
+}
+
+/* ── Content ── */
+.kr-content {
+  overflow-y: auto;
+  max-height: calc(100vh - 180px);
+  padding-right: 4px;
+}
+
+/* ── Framework Header ── */
+.kr-fw-header {
+  margin-bottom: 12px;
+}
+
+.kr-fw-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--kr-text-heading);
+  margin: 0 0 4px;
+}
+
+.kr-fw-thesis {
+  font-size: 12px;
+  color: var(--kr-text-light);
+  margin: 0;
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* ── Tree View ── */
+.kr-tree {
+  padding: 4px 0;
+}
+
+.kr-tree-node {
+  margin-bottom: 1px;
+}
+
+.kr-tree-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+.kr-tree-header:hover {
+  background: var(--kr-primary-light);
+}
+
+.kr-tree-toggle {
+  font-size: 10px;
+  color: var(--kr-text-light);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.kr-tree-label {
+  flex: 1;
+  font-size: 13px;
+  color: var(--kr-text-heading);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.kr-tree-label[style*="cursor: pointer"]:hover {
+  color: var(--kr-primary);
+  text-decoration: underline;
+}
+
+.kr-tree-page {
+  font-size: 10px;
+  color: var(--kr-text-light);
+  font-family: var(--kr-mono);
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--kr-primary-light);
+  flex-shrink: 0;
+}
+
+.kr-tree-page:hover {
+  color: var(--kr-primary);
+}
+
+.kr-badge {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  flex-shrink: 0;
+  background: var(--kr-primary-light);
+  color: var(--kr-primary);
+}
+
+.kr-badge-chapter { color: #6366f1; background: rgba(99, 102, 241, 0.1); }
+.kr-badge-argument { color: #10b981; background: rgba(16, 185, 129, 0.1); }
+.kr-badge-subpoint { color: #f59e0b; background: rgba(245, 158, 11, 0.1); }
+
+.kr-tree-summary {
+  font-size: 12px;
+  color: var(--kr-text-light);
+  padding: 2px 6px 4px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.kr-tree-action {
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+
+.kr-tree-header:hover .kr-tree-action {
+  opacity: 1;
+}
+
+.kr-note-indicator {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* ── Note Editor ── */
+.kr-note-editor {
+  margin: 4px 0 8px 20px;
+  padding: 8px;
+  background: var(--kr-bg-card);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius);
+}
+
+.kr-note-textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--kr-font);
+  background: var(--kr-bg);
+  color: var(--kr-text);
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.kr-note-textarea:focus {
+  border-color: var(--kr-primary);
+}
+
+.kr-note-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* ── Mind Map ── */
+.kr-mm-container {
+  overflow: auto;
+  max-height: calc(100vh - 220px);
+  padding: 8px 0;
+}
+
+.kr-mm-root {
+  display: flex;
+  align-items: center;
+}
+
+.kr-mm-branch {
+  display: flex;
+  align-items: center;
+}
+
+.kr-mm-children {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 16px;
+  margin-left: 4px;
+  border-left: 2px solid var(--kr-border);
+}
+
+.kr-mm-node {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 16px;
+  border: 2px solid var(--kr-border);
+  background: var(--kr-bg);
+  white-space: nowrap;
+  cursor: default;
+  transition: background 0.15s, box-shadow 0.15s;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.kr-mm-node:hover {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.kr-mm-depth-root {
+  background: var(--kr-primary);
+  border-color: var(--kr-primary);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.kr-mm-depth-1 {
+  border-color: #6366f1;
+  background: rgba(99, 102, 241, 0.08);
+  font-weight: 600;
+}
+
+.kr-mm-depth-2 {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.06);
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.kr-mm-depth-3 {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.06);
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.kr-mm-label {
+  color: var(--kr-text-heading);
+}
+
+.kr-mm-page {
+  font-size: 9px;
+  font-family: var(--kr-mono);
+  color: var(--kr-text-light);
+  background: var(--kr-bg);
+  padding: 1px 3px;
+  border-radius: 3px;
+  border: 1px solid var(--kr-border);
+}
+
+/* ── Preferences ── */
+.kr-prefs {
+  padding: 16px;
+  font-family: var(--kr-font);
+}
+
+.kr-prefs h2 {
+  font-size: 16px;
+  margin: 0 0 16px;
+}
+
+.kr-prefs-row {
+  margin-bottom: 12px;
+}
+
+.kr-prefs-row label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--kr-text-heading);
+}
+
+.kr-prefs-row input,
+.kr-prefs-row select {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius);
+  font-size: 13px;
+  background: var(--kr-bg);
+  color: var(--kr-text);
+  box-sizing: border-box;
+}
+
+.kr-prefs-row input:focus,
+.kr-prefs-row select:focus {
+  border-color: var(--kr-primary);
+  outline: none;
+}
+
+.kr-prefs-hint {
+  font-size: 11px;
+  color: var(--kr-text-light);
+  margin-top: 3px;
+}

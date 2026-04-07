@@ -1,0 +1,13 @@
+{
+  "name": "zotero-kreader",
+  "version": "0.1.0",
+  "description": "AI-powered reading framework generator for Zotero",
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node build.js --dev"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "adm-zip": "^0.5.16"
+  }
+}

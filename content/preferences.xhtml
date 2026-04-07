@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!DOCTYPE window>
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml">
+
+  <html:link rel="stylesheet" href="chrome://kreader/content/kreader.css" />
+
+  <html:div class="kr-prefs">
+    <html:h2>KReader Settings</html:h2>
+
+    <html:div class="kr-prefs-row">
+      <html:label for="kreader-provider">LLM Provider</html:label>
+      <html:select id="kreader-provider" preference="extensions.kreader.provider">
+        <html:option value="anthropic">Anthropic (Claude)</html:option>
+        <html:option value="openai">OpenAI</html:option>
+        <html:option value="custom">Custom (OpenAI-compatible)</html:option>
+      </html:select>
+    </html:div>
+
+    <html:div class="kr-prefs-row" id="kreader-baseurl-row" style="display: none;">
+      <html:label for="kreader-baseurl">Base URL</html:label>
+      <html:input id="kreader-baseurl" type="text"
+                  preference="extensions.kreader.baseUrl"
+                  placeholder="https://your-api.example.com/v1" />
+      <html:p class="kr-prefs-hint">OpenAI-compatible endpoint URL</html:p>
+    </html:div>
+
+    <html:div class="kr-prefs-row">
+      <html:label for="kreader-apikey">API Key</html:label>
+      <html:input id="kreader-apikey" type="password"
+                  preference="extensions.kreader.apiKey"
+                  placeholder="sk-..." />
+      <html:p class="kr-prefs-hint">Your API key is stored locally and never shared.</html:p>
+    </html:div>
+
+    <html:div class="kr-prefs-row">
+      <html:label for="kreader-model">Model</html:label>
+      <html:input id="kreader-model" type="text"
+                  preference="extensions.kreader.model"
+                  placeholder="Leave blank for default" />
+      <html:p class="kr-prefs-hint">Model ID (e.g. claude-sonnet-4-20250514, gpt-4o). Leave blank for provider default.</html:p>
+    </html:div>
+  </html:div>
+
+  <script type="text/javascript"><![CDATA[
+    // Show/hide base URL field based on provider selection
+    const providerSelect = document.getElementById("kreader-provider");
+    const baseUrlRow = document.getElementById("kreader-baseurl-row");
+
+    function updateVisibility() {
+      baseUrlRow.style.display = providerSelect.value === "custom" ? "" : "none";
+    }
+
+    providerSelect.addEventListener("change", updateVisibility);
+    updateVisibility();
+  ]]></script>
+</vbox>
