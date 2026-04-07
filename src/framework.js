@@ -1,5 +1,5 @@
 /**
- * Framework generation - ported from KReader, adapted for Zotero.
+ * Framework generation - ported from Zhutero, adapted for Zotero.
  * Generates a hierarchical reading framework from document text using LLM.
  */
 

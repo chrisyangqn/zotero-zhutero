@@ -3,7 +3,7 @@
  * Uses a JSON file in Zotero's data directory.
  */
 
-const STORAGE_FILE = "kreader-data.json";
+const STORAGE_FILE = "zhutero-data.json";
 
 let _cache = null;
 
@@ -24,7 +24,7 @@ async function loadAll() {
     _cache = JSON.parse(raw);
     return _cache;
   } catch (e) {
-    Zotero.log(`[KReader] Failed to load storage: ${e.message}`, "warning");
+    Zotero.log(`[Zhutero] Failed to load storage: ${e.message}`, "warning");
     _cache = { frameworks: {}, notes: {} };
     return _cache;
   }

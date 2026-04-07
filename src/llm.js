@@ -33,10 +33,10 @@ function getPrefs() {
   const prefs = Components.classes["@mozilla.org/preferences-service;1"]
     .getService(Components.interfaces.nsIPrefBranch);
   return {
-    provider: prefs.getStringPref("extensions.kreader.provider", "anthropic"),
-    apiKey: prefs.getStringPref("extensions.kreader.apiKey", ""),
-    model: prefs.getStringPref("extensions.kreader.model", ""),
-    baseUrl: prefs.getStringPref("extensions.kreader.baseUrl", ""),
+    provider: prefs.getStringPref("extensions.zhutero.provider", "anthropic"),
+    apiKey: prefs.getStringPref("extensions.zhutero.apiKey", ""),
+    model: prefs.getStringPref("extensions.zhutero.model", ""),
+    baseUrl: prefs.getStringPref("extensions.zhutero.baseUrl", ""),
   };
 }
 

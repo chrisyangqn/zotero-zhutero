@@ -1,16 +1,16 @@
 /**
- * KReader - Main plugin class for Zotero 7
+ * Zhutero - Main plugin class for Zotero 7
  * Registers a sidebar tab with framework tree, mind map, and notes.
  */
 
 /* globals Zotero, Components, Services, IOUtils, PathUtils, ChromeUtils */
 
-class KReaderPlugin {
+class ZhuteroPlugin {
   constructor() {
     this.id = null;
     this.version = null;
     this.rootURI = null;
-    this._tabId = "kreader-tab";
+    this._tabId = "zhutero-tab";
     this._notifierID = null;
     this._currentItemKey = null;
     this._framework = null;
@@ -35,11 +35,10 @@ class KReaderPlugin {
     Zotero.PreferencePanes.register({
       pluginID: id,
       src: rootURI + "content/preferences.xhtml",
-      label: "KReader",
-      image: rootURI + "content/icons/icon16.png",
+      label: "Zhutero",
     });
 
-    Zotero.log("[KReader] Plugin initialized v" + version);
+    Zotero.log("[Zhutero] Plugin initialized v" + version);
   }
 
   async _registerPane() {
@@ -48,12 +47,12 @@ class KReaderPlugin {
       paneID: this._tabId,
       pluginID: this.id,
       header: {
-        l10nID: "kreader-tab-label",
-        icon: this.rootURI + "content/icons/icon16.png",
+        l10nID: "zhutero-tab-label",
+        icon: "chrome://zotero/skin/16/universal/book.svg",
       },
       sidenav: {
-        l10nID: "kreader-tab-label",
-        icon: this.rootURI + "content/icons/icon16.png",
+        l10nID: "zhutero-tab-label",
+        icon: "chrome://zotero/skin/16/universal/book.svg",
       },
       // Called when the section needs to render
       onRender: ({ body, item }) => {
@@ -67,7 +66,7 @@ class KReaderPlugin {
 
   async _renderPanel(body, item) {
     if (!item) {
-      body.innerHTML = `<div class="kr-empty">Select a PDF item to generate a reading framework.</div>`;
+      body.innerHTML = `<div class="zt-empty">Select a PDF item to generate a reading framework.</div>`;
       return;
     }
 
@@ -85,7 +84,7 @@ class KReaderPlugin {
     // Build UI
     body.innerHTML = "";
     const container = body.ownerDocument.createXULElement("div") || body.ownerDocument.createElement("div");
-    container.className = "kr-container";
+    container.className = "zt-container";
 
     // Toolbar
     const toolbar = this._createToolbar(body.ownerDocument, item);
@@ -93,13 +92,13 @@ class KReaderPlugin {
 
     // Content area
     const content = body.ownerDocument.createElement("div");
-    content.className = "kr-content";
-    content.id = "kr-content";
+    content.className = "zt-content";
+    content.id = "zt-content";
 
     if (this._framework) {
       this._renderFramework(content, body.ownerDocument);
     } else {
-      content.innerHTML = `<div class="kr-empty">
+      content.innerHTML = `<div class="zt-empty">
         <p>No framework yet.</p>
         <p>Click <strong>Generate Framework</strong> to analyze this document.</p>
       </div>`;
@@ -111,45 +110,45 @@ class KReaderPlugin {
 
   _injectCSS(body) {
     const doc = body.ownerDocument;
-    const existingStyle = doc.getElementById("kreader-style");
+    const existingStyle = doc.getElementById("zhutero-style");
     if (existingStyle) return;
 
     const link = doc.createElement("link");
-    link.id = "kreader-style";
+    link.id = "zhutero-style";
     link.rel = "stylesheet";
-    link.href = this.rootURI + "content/kreader.css";
+    link.href = this.rootURI + "content/zhutero.css";
     (doc.head || doc.documentElement).appendChild(link);
   }
 
   _createToolbar(doc, item) {
     const toolbar = doc.createElement("div");
-    toolbar.className = "kr-toolbar";
+    toolbar.className = "zt-toolbar";
 
     // View toggle
     const viewToggle = doc.createElement("div");
-    viewToggle.className = "kr-view-toggle";
+    viewToggle.className = "zt-view-toggle";
 
     const treeBtn = doc.createElement("button");
-    treeBtn.className = `kr-btn kr-btn-sm ${this._activeView === "tree" ? "kr-btn-active" : ""}`;
+    treeBtn.className = `zt-btn zt-btn-sm ${this._activeView === "tree" ? "zt-btn-active" : ""}`;
     treeBtn.textContent = "Tree";
     treeBtn.addEventListener("click", () => {
       this._activeView = "tree";
-      const content = doc.getElementById("kr-content");
+      const content = doc.getElementById("zt-content");
       if (content && this._framework) this._renderFramework(content, doc);
       viewToggle.querySelectorAll("button").forEach((b, i) => {
-        b.className = `kr-btn kr-btn-sm ${i === 0 ? "kr-btn-active" : ""}`;
+        b.className = `zt-btn zt-btn-sm ${i === 0 ? "zt-btn-active" : ""}`;
       });
     });
 
     const mmBtn = doc.createElement("button");
-    mmBtn.className = `kr-btn kr-btn-sm ${this._activeView === "mindmap" ? "kr-btn-active" : ""}`;
+    mmBtn.className = `zt-btn zt-btn-sm ${this._activeView === "mindmap" ? "zt-btn-active" : ""}`;
     mmBtn.textContent = "Mind Map";
     mmBtn.addEventListener("click", () => {
       this._activeView = "mindmap";
-      const content = doc.getElementById("kr-content");
+      const content = doc.getElementById("zt-content");
       if (content && this._framework) this._renderFramework(content, doc);
       viewToggle.querySelectorAll("button").forEach((b, i) => {
-        b.className = `kr-btn kr-btn-sm ${i === 1 ? "kr-btn-active" : ""}`;
+        b.className = `zt-btn zt-btn-sm ${i === 1 ? "zt-btn-active" : ""}`;
       });
     });
 
@@ -158,12 +157,25 @@ class KReaderPlugin {
 
     // Generate button
     const genBtn = doc.createElement("button");
-    genBtn.className = "kr-btn kr-btn-primary";
+    genBtn.className = "zt-btn zt-btn-primary";
     genBtn.textContent = this._framework ? "Regenerate" : "Generate Framework";
     genBtn.addEventListener("click", () => this._handleGenerate(doc, item, genBtn));
 
+    // Export to Zotero Note button (compatible with Better Notes)
+    const exportBtn = doc.createElement("button");
+    exportBtn.className = "zt-btn zt-btn-sm";
+    exportBtn.textContent = "Export to Note";
+    exportBtn.title = "Export framework as a Zotero note (works with Better Notes)";
+    if (!this._framework) exportBtn.disabled = true;
+    exportBtn.addEventListener("click", () => this._handleExportToNote(doc, item, exportBtn));
+
     toolbar.appendChild(viewToggle);
-    toolbar.appendChild(genBtn);
+
+    const rightActions = doc.createElement("div");
+    rightActions.className = "zt-toolbar-actions";
+    rightActions.appendChild(exportBtn);
+    rightActions.appendChild(genBtn);
+    toolbar.appendChild(rightActions);
 
     return toolbar;
   }
@@ -188,15 +200,15 @@ class KReaderPlugin {
       this._framework = framework;
       await saveFramework(this._currentItemKey, framework);
 
-      const content = doc.getElementById("kr-content");
+      const content = doc.getElementById("zt-content");
       if (content) this._renderFramework(content, doc);
 
       btn.textContent = "Regenerate";
     } catch (e) {
-      Zotero.log(`[KReader] Error: ${e.message}`, "error");
-      const content = doc.getElementById("kr-content");
+      Zotero.log(`[Zhutero] Error: ${e.message}`, "error");
+      const content = doc.getElementById("zt-content");
       if (content) {
-        content.innerHTML = `<div class="kr-error">${e.message}</div>`;
+        content.innerHTML = `<div class="zt-error">${e.message}</div>`;
       }
       btn.textContent = originalText;
     } finally {
@@ -221,16 +233,16 @@ class KReaderPlugin {
 
     // Title & thesis
     const header = doc.createElement("div");
-    header.className = "kr-fw-header";
+    header.className = "zt-fw-header";
     header.innerHTML = `
-      <h3 class="kr-fw-title">${this._esc(fw.title || "Untitled")}</h3>
-      ${fw.thesis ? `<p class="kr-fw-thesis">${this._esc(fw.thesis)}</p>` : ""}
+      <h3 class="zt-fw-title">${this._esc(fw.title || "Untitled")}</h3>
+      ${fw.thesis ? `<p class="zt-fw-thesis">${this._esc(fw.thesis)}</p>` : ""}
     `;
     container.appendChild(header);
 
     // Tree nodes
     const tree = doc.createElement("div");
-    tree.className = "kr-tree";
+    tree.className = "zt-tree";
     if (fw.children) {
       fw.children.forEach((child) => {
         tree.appendChild(this._createTreeNode(child, doc, 0));
@@ -241,7 +253,7 @@ class KReaderPlugin {
 
   _createTreeNode(node, doc, depth) {
     const el = doc.createElement("div");
-    el.className = "kr-tree-node";
+    el.className = "zt-tree-node";
     el.style.marginLeft = `${depth * 16}px`;
 
     const hasChildren = node.children?.length > 0;
@@ -249,11 +261,11 @@ class KReaderPlugin {
 
     // Header row
     const header = doc.createElement("div");
-    header.className = "kr-tree-header";
+    header.className = "zt-tree-header";
 
     // Toggle
     const toggle = doc.createElement("span");
-    toggle.className = "kr-tree-toggle";
+    toggle.className = "zt-tree-toggle";
     toggle.textContent = hasChildren ? (collapsed ? "▶" : "▼") : " ";
     toggle.style.cursor = hasChildren ? "pointer" : "default";
     toggle.style.width = "16px";
@@ -261,7 +273,7 @@ class KReaderPlugin {
 
     // Label
     const label = doc.createElement("span");
-    label.className = "kr-tree-label";
+    label.className = "zt-tree-label";
     label.textContent = node.label || "";
     if (node.page) {
       label.style.cursor = "pointer";
@@ -270,7 +282,7 @@ class KReaderPlugin {
 
     // Page ref
     const pageRef = doc.createElement("span");
-    pageRef.className = "kr-tree-page";
+    pageRef.className = "zt-tree-page";
     if (node.page) {
       pageRef.textContent = `p.${node.page}`;
       pageRef.addEventListener("click", () => this._navigateToPage(node.page));
@@ -278,12 +290,12 @@ class KReaderPlugin {
 
     // Type badge
     const badge = doc.createElement("span");
-    badge.className = `kr-badge kr-badge-${node.type || "other"}`;
+    badge.className = `zt-badge zt-badge-${node.type || "other"}`;
     badge.textContent = node.type || "";
 
     // Note button
     const noteBtn = doc.createElement("span");
-    noteBtn.className = "kr-tree-action";
+    noteBtn.className = "zt-tree-action";
     noteBtn.textContent = "📝";
     noteBtn.title = "Add/edit note";
     noteBtn.addEventListener("click", () => this._toggleNoteEditor(el, node, doc));
@@ -298,7 +310,7 @@ class KReaderPlugin {
     const existingNote = this._notes.find((n) => n.node_id === node.id);
     if (existingNote) {
       const noteIndicator = doc.createElement("span");
-      noteIndicator.className = "kr-note-indicator";
+      noteIndicator.className = "zt-note-indicator";
       noteIndicator.title = existingNote.content.slice(0, 100);
       noteIndicator.textContent = "💬";
       header.appendChild(noteIndicator);
@@ -309,7 +321,7 @@ class KReaderPlugin {
     // Summary
     if (node.summary) {
       const summary = doc.createElement("p");
-      summary.className = "kr-tree-summary";
+      summary.className = "zt-tree-summary";
       summary.textContent = node.summary;
       summary.style.marginLeft = `${depth * 16 + 20}px`;
       if (collapsed) summary.style.display = "none";
@@ -319,7 +331,7 @@ class KReaderPlugin {
     // Children container
     if (hasChildren) {
       const childrenEl = doc.createElement("div");
-      childrenEl.className = "kr-tree-children";
+      childrenEl.className = "zt-tree-children";
       if (collapsed) childrenEl.style.display = "none";
       node.children.forEach((child) => {
         childrenEl.appendChild(this._createTreeNode(child, doc, depth + 1));
@@ -330,7 +342,7 @@ class KReaderPlugin {
         collapsed = !collapsed;
         toggle.textContent = collapsed ? "▶" : "▼";
         childrenEl.style.display = collapsed ? "none" : "";
-        const sum = el.querySelector(":scope > .kr-tree-summary");
+        const sum = el.querySelector(":scope > .zt-tree-summary");
         if (sum) sum.style.display = collapsed ? "none" : "";
       });
     }
@@ -340,25 +352,25 @@ class KReaderPlugin {
 
   _toggleNoteEditor(parentEl, node, doc) {
     // Remove existing editor if any
-    const existing = parentEl.querySelector(".kr-note-editor");
+    const existing = parentEl.querySelector(".zt-note-editor");
     if (existing) { existing.remove(); return; }
 
     const noteData = this._notes.find((n) => n.node_id === node.id);
 
     const editor = doc.createElement("div");
-    editor.className = "kr-note-editor";
+    editor.className = "zt-note-editor";
 
     const textarea = doc.createElement("textarea");
-    textarea.className = "kr-note-textarea";
+    textarea.className = "zt-note-textarea";
     textarea.value = noteData?.content || "";
     textarea.placeholder = "Write your notes here...";
     textarea.rows = 4;
 
     const actions = doc.createElement("div");
-    actions.className = "kr-note-actions";
+    actions.className = "zt-note-actions";
 
     const saveBtn = doc.createElement("button");
-    saveBtn.className = "kr-btn kr-btn-sm kr-btn-primary";
+    saveBtn.className = "zt-btn zt-btn-sm zt-btn-primary";
     saveBtn.textContent = "Save";
     saveBtn.addEventListener("click", async () => {
       await saveNote(this._currentItemKey, node.id, textarea.value);
@@ -367,7 +379,7 @@ class KReaderPlugin {
     });
 
     const cancelBtn = doc.createElement("button");
-    cancelBtn.className = "kr-btn kr-btn-sm";
+    cancelBtn.className = "zt-btn zt-btn-sm";
     cancelBtn.textContent = "Cancel";
     cancelBtn.addEventListener("click", () => editor.remove());
 
@@ -387,21 +399,21 @@ class KReaderPlugin {
     if (!fw) return;
 
     const mmContainer = doc.createElement("div");
-    mmContainer.className = "kr-mm-container";
+    mmContainer.className = "zt-mm-container";
 
     const root = doc.createElement("div");
-    root.className = "kr-mm-root";
+    root.className = "zt-mm-root";
 
     // Root node
     const rootNode = doc.createElement("div");
-    rootNode.className = "kr-mm-node kr-mm-depth-root";
+    rootNode.className = "zt-mm-node zt-mm-depth-root";
     rootNode.textContent = fw.title || "Untitled";
     root.appendChild(rootNode);
 
     // Children
     if (fw.children?.length) {
       const childrenEl = doc.createElement("div");
-      childrenEl.className = "kr-mm-children";
+      childrenEl.className = "zt-mm-children";
       fw.children.forEach((child) => {
         childrenEl.appendChild(this._createMindMapNode(child, doc, 1));
       });
@@ -419,21 +431,21 @@ class KReaderPlugin {
 
   _createMindMapNode(node, doc, depth) {
     const branch = doc.createElement("div");
-    branch.className = "kr-mm-branch";
+    branch.className = "zt-mm-branch";
 
     const nodeEl = doc.createElement("div");
-    nodeEl.className = `kr-mm-node kr-mm-depth-${Math.min(depth, 3)}`;
+    nodeEl.className = `zt-mm-node zt-mm-depth-${Math.min(depth, 3)}`;
     nodeEl.title = node.summary || "";
 
     const label = doc.createElement("span");
-    label.className = "kr-mm-label";
+    label.className = "zt-mm-label";
     label.textContent = node.label || "";
 
     nodeEl.appendChild(label);
 
     if (node.page) {
       const page = doc.createElement("span");
-      page.className = "kr-mm-page";
+      page.className = "zt-mm-page";
       page.textContent = `p.${node.page}`;
       nodeEl.appendChild(page);
       nodeEl.style.cursor = "pointer";
@@ -444,7 +456,7 @@ class KReaderPlugin {
 
     if (node.children?.length) {
       const childrenEl = doc.createElement("div");
-      childrenEl.className = "kr-mm-children";
+      childrenEl.className = "zt-mm-children";
       node.children.forEach((child) => {
         childrenEl.appendChild(this._createMindMapNode(child, doc, depth + 1));
       });
@@ -452,6 +464,203 @@ class KReaderPlugin {
     }
 
     return branch;
+  }
+
+  // ── Export to Zotero Note (Better Notes compatible) ──
+
+  async _handleExportToNote(doc, item, btn) {
+    if (!this._framework) return;
+
+    const originalText = btn.textContent;
+    btn.textContent = "Exporting...";
+    btn.disabled = true;
+
+    try {
+      // Find the parent item (if item is an attachment, get its parent)
+      let parentItem = item;
+      if (item.isAttachment() && item.parentItemID) {
+        parentItem = Zotero.Items.get(item.parentItemID);
+      }
+
+      // Find the PDF attachment for building zotero://open-pdf links
+      let pdfAttachment = null;
+      if (item.isAttachment() && item.attachmentContentType === "application/pdf") {
+        pdfAttachment = item;
+      } else {
+        const attachmentIDs = parentItem.getAttachments();
+        for (const aid of attachmentIDs) {
+          const att = Zotero.Items.get(aid);
+          if (att.attachmentContentType === "application/pdf") {
+            pdfAttachment = att;
+            break;
+          }
+        }
+      }
+
+      // Build HTML note content
+      const html = this._frameworkToHTML(this._framework, pdfAttachment, parentItem);
+
+      // Create a new Zotero note item
+      const noteItem = new Zotero.Item("note");
+      noteItem.parentID = parentItem.id;
+      noteItem.libraryID = parentItem.libraryID;
+      noteItem.setNote(html);
+      await noteItem.saveTx();
+
+      btn.textContent = "Exported!";
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.disabled = false;
+      }, 1500);
+
+      Zotero.log(`[Zhutero] Framework exported as note for item ${parentItem.key}`);
+    } catch (e) {
+      Zotero.log(`[Zhutero] Export error: ${e.message}`, "error");
+      btn.textContent = "Export failed";
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.disabled = false;
+      }, 2000);
+    }
+  }
+
+  /**
+   * Convert framework tree to structured HTML for Zotero notes.
+   * Uses zotero://open-pdf links for page navigation.
+   * Output format works natively with Better Notes' outline & template system.
+   */
+  _frameworkToHTML(fw, pdfAttachment, parentItem) {
+    const libraryID = parentItem.libraryID;
+    const pdfKey = pdfAttachment?.key;
+
+    let html = `<div data-schema-version="9">`;
+
+    // Title
+    html += `<h1>${this._esc(fw.title || "Reading Framework")}</h1>\n`;
+
+    // Thesis
+    if (fw.thesis) {
+      html += `<blockquote><p>${this._esc(fw.thesis)}</p></blockquote>\n`;
+    }
+
+    // Metadata line
+    html += `<p><em>Generated by Zhutero on ${new Date().toLocaleDateString()}</em></p>\n`;
+    html += `<hr/>\n`;
+
+    // Render tree nodes as nested headings + lists
+    if (fw.children) {
+      fw.children.forEach((child) => {
+        html += this._nodeToHTML(child, 2, pdfKey, libraryID);
+      });
+    }
+
+    // Append Zhutero notes if any
+    if (this._notes?.length > 0) {
+      html += `<hr/>\n<h2>Notes</h2>\n`;
+      this._notes.forEach((note) => {
+        const nodeLabel = this._findNodeLabel(fw, note.node_id);
+        html += `<h3>${this._esc(nodeLabel || note.node_id)}</h3>\n`;
+        html += `<p>${this._esc(note.content)}</p>\n`;
+      });
+    }
+
+    html += `</div>`;
+    return html;
+  }
+
+  _nodeToHTML(node, headingLevel, pdfKey, libraryID) {
+    let html = "";
+    const hl = Math.min(headingLevel, 6);
+
+    // Page link
+    let pageLink = "";
+    if (node.page && pdfKey) {
+      const uri = `zotero://open-pdf/library/items/${pdfKey}?page=${node.page}`;
+      pageLink = ` <a href="${uri}">(p.${node.page})</a>`;
+    } else if (node.page) {
+      pageLink = ` (p.${node.page})`;
+    }
+
+    // Node as heading
+    html += `<h${hl}>${this._esc(node.label || "")}${pageLink}</h${hl}>\n`;
+
+    // Summary as paragraph
+    if (node.summary) {
+      html += `<p>${this._esc(node.summary)}</p>\n`;
+    }
+
+    // Quotes as blockquotes
+    if (node.quotes?.length) {
+      node.quotes.forEach((q) => {
+        let qLink = "";
+        if (q.page && pdfKey) {
+          const uri = `zotero://open-pdf/library/items/${pdfKey}?page=${q.page}`;
+          qLink = ` <a href="${uri}">(p.${q.page})</a>`;
+        }
+        html += `<blockquote><p>${this._esc(q.text)}${qLink}</p></blockquote>\n`;
+      });
+    }
+
+    // Children: if next level would exceed h6, use a list instead
+    if (node.children?.length) {
+      if (headingLevel >= 6) {
+        html += `<ul>\n`;
+        node.children.forEach((child) => {
+          html += this._nodeToListHTML(child, pdfKey, libraryID);
+        });
+        html += `</ul>\n`;
+      } else {
+        node.children.forEach((child) => {
+          html += this._nodeToHTML(child, headingLevel + 1, pdfKey, libraryID);
+        });
+      }
+    }
+
+    return html;
+  }
+
+  _nodeToListHTML(node, pdfKey, libraryID) {
+    let pageLink = "";
+    if (node.page && pdfKey) {
+      const uri = `zotero://open-pdf/library/items/${pdfKey}?page=${node.page}`;
+      pageLink = ` <a href="${uri}">(p.${node.page})</a>`;
+    }
+
+    let html = `<li><strong>${this._esc(node.label || "")}</strong>${pageLink}`;
+    if (node.summary) {
+      html += ` — ${this._esc(node.summary)}`;
+    }
+
+    if (node.children?.length) {
+      html += `\n<ul>\n`;
+      node.children.forEach((child) => {
+        html += this._nodeToListHTML(child, pdfKey, libraryID);
+      });
+      html += `</ul>\n`;
+    }
+
+    html += `</li>\n`;
+    return html;
+  }
+
+  _findNodeLabel(fw, nodeId) {
+    function search(node) {
+      if (node.id === nodeId) return node.label;
+      if (node.children) {
+        for (const child of node.children) {
+          const result = search(child);
+          if (result) return result;
+        }
+      }
+      return null;
+    }
+    if (fw.children) {
+      for (const child of fw.children) {
+        const result = search(child);
+        if (result) return result;
+      }
+    }
+    return null;
   }
 
   // ── Navigation ──
@@ -464,7 +673,7 @@ class KReaderPlugin {
         reader.navigate({ pageIndex: pageNum - 1 });
       }
     } catch (e) {
-      Zotero.log(`[KReader] Navigate error: ${e.message}`, "warning");
+      Zotero.log(`[Zhutero] Navigate error: ${e.message}`, "warning");
     }
   }
 
@@ -482,6 +691,6 @@ class KReaderPlugin {
     try {
       Zotero.ItemPaneManager.unregisterSection(this._tabId);
     } catch (e) {}
-    Zotero.log("[KReader] Plugin destroyed");
+    Zotero.log("[Zhutero] Plugin destroyed");
   }
 }
