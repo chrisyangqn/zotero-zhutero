@@ -22,6 +22,7 @@ const include = [
   "content/zhutero.js",
   "content/zhutero.css",
   "content/preferences.xhtml",
+  "content/prefs.js",
   "src/llm.js",
   "src/framework.js",
   "src/storage.js",

@@ -1,101 +1,44 @@
-<?xml version="1.0"?>
-<!DOCTYPE window>
-<window
-  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
-  xmlns:html="http://www.w3.org/1999/xhtml">
+<groupbox onload="Zhutero_Preferences.init()">
+  <label><html:h2>Zhutero Settings</html:h2></label>
 
-  <vbox id="zhutero-prefs" style="padding: 12px;">
-    <groupbox>
-      <label><html:h2 style="margin: 0 0 12px;">Zhutero Settings</html:h2></label>
+  <hbox align="center">
+    <label value="LLM Provider:" style="width: 110px;" />
+    <menulist id="zhutero-provider" native="true" style="flex: 1;">
+      <menupopup>
+        <menuitem label="Anthropic (Claude)" value="anthropic" />
+        <menuitem label="OpenAI" value="openai" />
+        <menuitem label="Custom (OpenAI-compatible)" value="custom" />
+      </menupopup>
+    </menulist>
+  </hbox>
 
-      <hbox align="center" style="margin-bottom: 10px;">
-        <label value="LLM Provider:" style="width: 100px;" />
-        <menulist id="zhutero-provider" style="flex: 1;">
-          <menupopup>
-            <menuitem label="Anthropic (Claude)" value="anthropic" />
-            <menuitem label="OpenAI" value="openai" />
-            <menuitem label="Custom (OpenAI-compatible)" value="custom" />
-          </menupopup>
-        </menulist>
-      </hbox>
+  <hbox id="zhutero-baseurl-row" align="center" hidden="true">
+    <label value="Base URL:" style="width: 110px;" />
+    <html:input id="zhutero-baseurl" type="text"
+                placeholder="https://your-api.example.com/v1"
+                style="flex: 1;" />
+  </hbox>
 
-      <hbox id="zhutero-baseurl-row" align="center" style="margin-bottom: 10px; display: none;">
-        <label value="Base URL:" style="width: 100px;" />
-        <html:input id="zhutero-baseurl" type="text"
-                    placeholder="https://your-api.example.com/v1"
-                    style="flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px;" />
-      </hbox>
+  <hbox align="center">
+    <label value="API Key:" style="width: 110px;" />
+    <html:input id="zhutero-apikey" type="password"
+                placeholder="sk-..."
+                style="flex: 1;" />
+  </hbox>
 
-      <hbox align="center" style="margin-bottom: 10px;">
-        <label value="API Key:" style="width: 100px;" />
-        <html:input id="zhutero-apikey" type="password"
-                    placeholder="sk-..."
-                    style="flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px;" />
-      </hbox>
+  <hbox align="center">
+    <label value="Model:" style="width: 110px;" />
+    <html:input id="zhutero-model" type="text"
+                placeholder="Leave blank for default"
+                style="flex: 1;" />
+  </hbox>
 
-      <hbox align="center" style="margin-bottom: 10px;">
-        <label value="Model:" style="width: 100px;" />
-        <html:input id="zhutero-model" type="text"
-                    placeholder="Leave blank for default"
-                    style="flex: 1; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px;" />
-      </hbox>
+  <label style="font-size: 11px; color: #888; margin-inline-start: 110px;">
+    e.g. claude-sonnet-4-20250514, gpt-4o
+  </label>
 
-      <html:p style="font-size: 11px; color: #888; margin: 4px 0 0 100px;">
-        e.g. claude-sonnet-4-20250514, gpt-4o. Leave blank for provider default.
-      </html:p>
-
-    </groupbox>
-
-    <html:div id="zhutero-status"
-              style="margin-top: 8px; padding: 6px 10px; background: rgba(16,185,129,0.1); border-radius: 4px; color: #10b981; font-size: 12px; display: none;">
-      Settings saved.
-    </html:div>
-  </vbox>
-
-  <script><![CDATA[
-    (function() {
-      const prefs = Components.classes["@mozilla.org/preferences-service;1"]
-        .getService(Components.interfaces.nsIPrefBranch);
-      const PREFIX = "extensions.zhutero.";
-
-      const providerEl = document.getElementById("zhutero-provider");
-      const baseurlEl = document.getElementById("zhutero-baseurl");
-      const apikeyEl = document.getElementById("zhutero-apikey");
-      const modelEl = document.getElementById("zhutero-model");
-      const baseurlRow = document.getElementById("zhutero-baseurl-row");
-      const statusEl = document.getElementById("zhutero-status");
-
-      function getPref(key) {
-        try { return prefs.getStringPref(PREFIX + key, ""); }
-        catch (e) { return ""; }
-      }
-
-      function setPref(key, val) {
-        prefs.setStringPref(PREFIX + key, val);
-        statusEl.style.display = "";
-        setTimeout(() => { statusEl.style.display = "none"; }, 1500);
-      }
-
-      // Load current values
-      let curProvider = getPref("provider") || "anthropic";
-      providerEl.value = curProvider;
-      baseurlEl.value = getPref("baseUrl");
-      apikeyEl.value = getPref("apiKey");
-      modelEl.value = getPref("model");
-
-      function updateVisibility() {
-        baseurlRow.style.display = providerEl.value === "custom" ? "" : "none";
-      }
-      updateVisibility();
-
-      // Save on change
-      providerEl.addEventListener("command", () => {
-        setPref("provider", providerEl.value);
-        updateVisibility();
-      });
-      baseurlEl.addEventListener("change", () => setPref("baseUrl", baseurlEl.value));
-      apikeyEl.addEventListener("change", () => setPref("apiKey", apikeyEl.value));
-      modelEl.addEventListener("change", () => setPref("model", modelEl.value));
-    })();
-  ]]></script>
-</window>
+  <label id="zhutero-status" hidden="true"
+         style="color: #10b981; font-size: 12px; margin-top: 8px;">
+    Settings saved.
+  </label>
+</groupbox>

@@ -4,6 +4,9 @@
  */
 
 /* globals Zotero, Components, Services, IOUtils, PathUtils, ChromeUtils */
+/* globals chatCompletion, generateFramework, getItemFullText, parseLLMJson */
+/* globals createAnnotationsForFramework, removeZhuteroAnnotations */
+/* globals getFramework, saveFramework, getNotes, saveNote */
 
 class ZhuteroPlugin {
   constructor() {
@@ -11,11 +14,10 @@ class ZhuteroPlugin {
     this.version = null;
     this.rootURI = null;
     this._tabId = "zhutero-tab";
-    this._notifierID = null;
     this._currentItemKey = null;
     this._framework = null;
     this._notes = [];
-    this._activeView = "tree"; // "tree" | "mindmap"
+    this._activeView = "tree";
   }
 
   async init({ id, version, rootURI }) {
@@ -23,26 +25,21 @@ class ZhuteroPlugin {
     this.version = version;
     this.rootURI = rootURI;
 
-    // Load sub-modules
-    Services.scriptloader.loadSubScript(rootURI + "src/llm.js");
-    Services.scriptloader.loadSubScript(rootURI + "src/framework.js");
-    Services.scriptloader.loadSubScript(rootURI + "src/storage.js");
+    await Zotero.initializationPromise;
 
-    // Register the item pane section (Zotero 7 API)
-    await this._registerPane();
-
-    // Register preferences pane
     Zotero.PreferencePanes.register({
-      pluginID: id,
+      pluginID: "zhutero@qinuoyang.com",
       src: rootURI + "content/preferences.xhtml",
+      scripts: [rootURI + "content/prefs.js"],
       label: "Zhutero",
+      defaultXUL: true,
     });
 
+    await this._registerPane();
     Zotero.log("[Zhutero] Plugin initialized v" + version);
   }
 
   async _registerPane() {
-    // Zotero 7 item pane section API
     Zotero.ItemPaneManager.registerSection({
       paneID: this._tabId,
       pluginID: this.id,
@@ -54,65 +51,73 @@ class ZhuteroPlugin {
         l10nID: "zhutero-tab-label",
         icon: "chrome://zotero/skin/16/universal/book.svg",
       },
-      // Called when the section needs to render
-      onRender: ({ body, item }) => {
-        this._renderPanel(body, item);
-      },
-      onItemChange: ({ body, item }) => {
-        this._renderPanel(body, item);
-      },
+      onRender: ({ body, item }) => this._renderPanel(body, item),
+      onItemChange: ({ body, item }) => this._renderPanel(body, item),
     });
   }
 
   async _renderPanel(body, item) {
-    if (!item) {
-      body.innerHTML = `<div class="zt-empty">Select a PDF item to generate a reading framework.</div>`;
-      return;
-    }
+    try {
+      if (!item) {
+        body.innerHTML = `<div class="zt-empty">Select a PDF item to generate a reading framework.</div>`;
+        return;
+      }
 
-    const itemKey = item.key;
-    this._currentItemKey = itemKey;
+      this._currentItemKey = item.key;
+      this._panelBody = body;
+      this._panelItem = item;
 
-    // Load existing framework
-    const stored = await getFramework(itemKey);
-    this._framework = stored;
-    this._notes = await getNotes(itemKey);
+      try {
+        const stored = await getFramework(item.key);
+        this._framework = stored;
+        this._notes = await getNotes(item.key);
+      } catch (e) {
+        this._framework = null;
+        this._notes = [];
+        Zotero.log("[Zhutero] Failed to load data: " + e.message, "warning");
+      }
 
-    // Load CSS
-    this._injectCSS(body);
+      this._injectCSS(body);
+      body.innerHTML = "";
 
-    // Build UI
-    body.innerHTML = "";
-    const container = body.ownerDocument.createXULElement("div") || body.ownerDocument.createElement("div");
+    const container = body.ownerDocument.createElement("div");
     container.className = "zt-container";
 
-    // Toolbar
-    const toolbar = this._createToolbar(body.ownerDocument, item);
-    container.appendChild(toolbar);
+    // ── Action bar (top) ──
+    const actionBar = this._createActionBar(body.ownerDocument, item);
+    container.appendChild(actionBar);
 
-    // Content area
+    // ── View toggle ──
+    if (this._framework) {
+      const viewBar = this._createViewToggle(body.ownerDocument);
+      container.appendChild(viewBar);
+    }
+
+    // ── Content ──
     const content = body.ownerDocument.createElement("div");
     content.className = "zt-content";
     content.id = "zt-content";
 
     if (this._framework) {
-      this._renderFramework(content, body.ownerDocument);
+      this._renderView(content, body.ownerDocument);
     } else {
       content.innerHTML = `<div class="zt-empty">
         <p>No framework yet.</p>
-        <p>Click <strong>Generate Framework</strong> to analyze this document.</p>
+        <p>Click <strong>Generate</strong> to analyze this document.</p>
       </div>`;
     }
 
     container.appendChild(content);
     body.appendChild(container);
+    } catch (e) {
+      Zotero.log("[Zhutero] Render error: " + e.message, "error");
+      body.innerHTML = `<div style="padding:16px;color:red;font-size:12px;">Zhutero error: ${e.message}</div>`;
+    }
   }
 
   _injectCSS(body) {
     const doc = body.ownerDocument;
-    const existingStyle = doc.getElementById("zhutero-style");
-    if (existingStyle) return;
-
+    if (doc.getElementById("zhutero-style")) return;
     const link = doc.createElement("link");
     link.id = "zhutero-style";
     link.rel = "stylesheet";
@@ -120,65 +125,80 @@ class ZhuteroPlugin {
     (doc.head || doc.documentElement).appendChild(link);
   }
 
-  _createToolbar(doc, item) {
-    const toolbar = doc.createElement("div");
-    toolbar.className = "zt-toolbar";
+  // ── Action Bar ──
 
-    // View toggle
-    const viewToggle = doc.createElement("div");
-    viewToggle.className = "zt-view-toggle";
+  _createActionBar(doc, item) {
+    const bar = doc.createElement("div");
+    bar.className = "zt-action-bar";
 
-    const treeBtn = doc.createElement("button");
-    treeBtn.className = `zt-btn zt-btn-sm ${this._activeView === "tree" ? "zt-btn-active" : ""}`;
-    treeBtn.textContent = "Tree";
-    treeBtn.addEventListener("click", () => {
-      this._activeView = "tree";
-      const content = doc.getElementById("zt-content");
-      if (content && this._framework) this._renderFramework(content, doc);
-      viewToggle.querySelectorAll("button").forEach((b, i) => {
-        b.className = `zt-btn zt-btn-sm ${i === 0 ? "zt-btn-active" : ""}`;
-      });
-    });
-
-    const mmBtn = doc.createElement("button");
-    mmBtn.className = `zt-btn zt-btn-sm ${this._activeView === "mindmap" ? "zt-btn-active" : ""}`;
-    mmBtn.textContent = "Mind Map";
-    mmBtn.addEventListener("click", () => {
-      this._activeView = "mindmap";
-      const content = doc.getElementById("zt-content");
-      if (content && this._framework) this._renderFramework(content, doc);
-      viewToggle.querySelectorAll("button").forEach((b, i) => {
-        b.className = `zt-btn zt-btn-sm ${i === 1 ? "zt-btn-active" : ""}`;
-      });
-    });
-
-    viewToggle.appendChild(treeBtn);
-    viewToggle.appendChild(mmBtn);
-
-    // Generate button
     const genBtn = doc.createElement("button");
     genBtn.className = "zt-btn zt-btn-primary";
-    genBtn.textContent = this._framework ? "Regenerate" : "Generate Framework";
+    genBtn.textContent = this._framework ? "Regenerate" : "Generate";
     genBtn.addEventListener("click", () => this._handleGenerate(doc, item, genBtn));
 
-    // Export to Zotero Note button (compatible with Better Notes)
     const exportBtn = doc.createElement("button");
-    exportBtn.className = "zt-btn zt-btn-sm";
+    exportBtn.className = "zt-btn";
     exportBtn.textContent = "Export to Note";
-    exportBtn.title = "Export framework as a Zotero note (works with Better Notes)";
     if (!this._framework) exportBtn.disabled = true;
     exportBtn.addEventListener("click", () => this._handleExportToNote(doc, item, exportBtn));
 
-    toolbar.appendChild(viewToggle);
+    const cleanBtn = doc.createElement("button");
+    cleanBtn.className = "zt-btn";
+    cleanBtn.textContent = "Clean Annotations";
+    cleanBtn.title = "Remove all [Zhutero] annotations from PDF";
+    cleanBtn.addEventListener("click", async () => {
+      cleanBtn.textContent = "Cleaning...";
+      await removeZhuteroAnnotations(item);
+      cleanBtn.textContent = "Done!";
+      setTimeout(() => { cleanBtn.textContent = "Clean Annotations"; }, 1500);
+    });
 
-    const rightActions = doc.createElement("div");
-    rightActions.className = "zt-toolbar-actions";
-    rightActions.appendChild(exportBtn);
-    rightActions.appendChild(genBtn);
-    toolbar.appendChild(rightActions);
-
-    return toolbar;
+    bar.appendChild(genBtn);
+    bar.appendChild(exportBtn);
+    bar.appendChild(cleanBtn);
+    return bar;
   }
+
+  // ── View Toggle ──
+
+  _createViewToggle(doc) {
+    const bar = doc.createElement("div");
+    bar.className = "zt-view-bar";
+
+    const views = [
+      { id: "tree", label: "Tree" },
+      { id: "mindmap", label: "Mind Map" },
+    ];
+
+    views.forEach((v) => {
+      const btn = doc.createElement("button");
+      btn.className = `zt-view-btn ${this._activeView === v.id ? "zt-view-btn-active" : ""}`;
+      btn.textContent = v.label;
+      btn.addEventListener("click", () => {
+        this._activeView = v.id;
+        // Update toggle active state
+        bar.querySelectorAll(".zt-view-btn").forEach((b) => b.classList.remove("zt-view-btn-active"));
+        btn.classList.add("zt-view-btn-active");
+        // Re-render content
+        const content = doc.getElementById("zt-content");
+        if (content) this._renderView(content, doc);
+      });
+      bar.appendChild(btn);
+    });
+
+    return bar;
+  }
+
+  _renderView(container, doc) {
+    container.innerHTML = "";
+    if (this._activeView === "mindmap") {
+      this._renderMindMap(container, doc);
+    } else {
+      this._renderTree(container, doc);
+    }
+  }
+
+  // ── Generate ──
 
   async _handleGenerate(doc, item, btn) {
     const originalText = btn.textContent;
@@ -188,40 +208,34 @@ class ZhuteroPlugin {
     try {
       const fullText = await getItemFullText(item.id);
       if (!fullText || fullText.length < 100) {
-        throw new Error("No text content found. Please index the PDF first (right-click → Reindex Item).");
+        throw new Error("No text content found. Please index the PDF first.");
       }
 
       const { framework } = await generateFramework(
-        fullText,
-        chatCompletion,
+        fullText, chatCompletion,
         (msg) => { btn.textContent = msg; }
       );
 
       this._framework = framework;
+
+      // Create colored PDF annotations for each framework node
+      btn.textContent = "Creating annotations...";
+      await removeZhuteroAnnotations(item);
+      await createAnnotationsForFramework(framework, item);
+
       await saveFramework(this._currentItemKey, framework);
 
-      const content = doc.getElementById("zt-content");
-      if (content) this._renderFramework(content, doc);
-
-      btn.textContent = "Regenerate";
+      // Full re-render to add view toggle
+      if (this._panelBody) {
+        await this._renderPanel(this._panelBody, item);
+      }
     } catch (e) {
       Zotero.log(`[Zhutero] Error: ${e.message}`, "error");
       const content = doc.getElementById("zt-content");
-      if (content) {
-        content.innerHTML = `<div class="zt-error">${e.message}</div>`;
-      }
+      if (content) content.innerHTML = `<div class="zt-error">${e.message}</div>`;
       btn.textContent = originalText;
     } finally {
       btn.disabled = false;
-    }
-  }
-
-  _renderFramework(container, doc) {
-    container.innerHTML = "";
-    if (this._activeView === "tree") {
-      this._renderTree(container, doc);
-    } else {
-      this._renderMindMap(container, doc);
     }
   }
 
@@ -231,7 +245,6 @@ class ZhuteroPlugin {
     const fw = this._framework;
     if (!fw) return;
 
-    // Title & thesis
     const header = doc.createElement("div");
     header.className = "zt-fw-header";
     header.innerHTML = `
@@ -240,7 +253,6 @@ class ZhuteroPlugin {
     `;
     container.appendChild(header);
 
-    // Tree nodes
     const tree = doc.createElement("div");
     tree.className = "zt-tree";
     if (fw.children) {
@@ -259,11 +271,9 @@ class ZhuteroPlugin {
     const hasChildren = node.children?.length > 0;
     let collapsed = depth > 1;
 
-    // Header row
     const header = doc.createElement("div");
     header.className = "zt-tree-header";
 
-    // Toggle
     const toggle = doc.createElement("span");
     toggle.className = "zt-tree-toggle";
     toggle.textContent = hasChildren ? (collapsed ? "▶" : "▼") : " ";
@@ -271,29 +281,25 @@ class ZhuteroPlugin {
     toggle.style.width = "16px";
     toggle.style.display = "inline-block";
 
-    // Label
     const label = doc.createElement("span");
     label.className = "zt-tree-label";
     label.textContent = node.label || "";
-    if (node.page) {
+    if (node.annotationKey || node.page) {
       label.style.cursor = "pointer";
-      label.addEventListener("click", () => this._navigateToPage(node.page));
+      label.addEventListener("click", () => this._navigateToNode(node));
     }
 
-    // Page ref
     const pageRef = doc.createElement("span");
     pageRef.className = "zt-tree-page";
     if (node.page) {
       pageRef.textContent = `p.${node.page}`;
-      pageRef.addEventListener("click", () => this._navigateToPage(node.page));
+      pageRef.addEventListener("click", () => this._navigateToNode(node));
     }
 
-    // Type badge
     const badge = doc.createElement("span");
     badge.className = `zt-badge zt-badge-${node.type || "other"}`;
     badge.textContent = node.type || "";
 
-    // Note button
     const noteBtn = doc.createElement("span");
     noteBtn.className = "zt-tree-action";
     noteBtn.textContent = "📝";
@@ -306,19 +312,17 @@ class ZhuteroPlugin {
     header.appendChild(badge);
     header.appendChild(noteBtn);
 
-    // Check if note exists
     const existingNote = this._notes.find((n) => n.node_id === node.id);
     if (existingNote) {
-      const noteIndicator = doc.createElement("span");
-      noteIndicator.className = "zt-note-indicator";
-      noteIndicator.title = existingNote.content.slice(0, 100);
-      noteIndicator.textContent = "💬";
-      header.appendChild(noteIndicator);
+      const ind = doc.createElement("span");
+      ind.className = "zt-note-indicator";
+      ind.title = existingNote.content.slice(0, 100);
+      ind.textContent = "💬";
+      header.appendChild(ind);
     }
 
     el.appendChild(header);
 
-    // Summary
     if (node.summary) {
       const summary = doc.createElement("p");
       summary.className = "zt-tree-summary";
@@ -328,7 +332,6 @@ class ZhuteroPlugin {
       el.appendChild(summary);
     }
 
-    // Children container
     if (hasChildren) {
       const childrenEl = doc.createElement("div");
       childrenEl.className = "zt-tree-children";
@@ -351,7 +354,6 @@ class ZhuteroPlugin {
   }
 
   _toggleNoteEditor(parentEl, node, doc) {
-    // Remove existing editor if any
     const existing = parentEl.querySelector(".zt-note-editor");
     if (existing) { existing.remove(); return; }
 
@@ -388,29 +390,102 @@ class ZhuteroPlugin {
     editor.appendChild(textarea);
     editor.appendChild(actions);
     parentEl.appendChild(editor);
-
     textarea.focus();
   }
 
-  // ── Mind Map View ──
+  // ── Mind Map View (zoomable + pannable) ──
 
   _renderMindMap(container, doc) {
     const fw = this._framework;
     if (!fw) return;
 
-    const mmContainer = doc.createElement("div");
-    mmContainer.className = "zt-mm-container";
+    // Zoom controls
+    const controls = doc.createElement("div");
+    controls.className = "zt-mm-controls";
 
+    let scale = 0.8;
+    let panX = 0, panY = 0;
+    let isPanning = false;
+    let startX, startY;
+
+    const zoomIn = doc.createElement("button");
+    zoomIn.className = "zt-btn zt-btn-sm";
+    zoomIn.textContent = "+";
+    zoomIn.title = "Zoom in";
+
+    const zoomOut = doc.createElement("button");
+    zoomOut.className = "zt-btn zt-btn-sm";
+    zoomOut.textContent = "−";
+    zoomOut.title = "Zoom out";
+
+    const zoomReset = doc.createElement("button");
+    zoomReset.className = "zt-btn zt-btn-sm";
+    zoomReset.textContent = "Fit";
+    zoomReset.title = "Reset zoom";
+
+    const zoomLabel = doc.createElement("span");
+    zoomLabel.className = "zt-mm-zoom-label";
+    zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+
+    controls.appendChild(zoomOut);
+    controls.appendChild(zoomLabel);
+    controls.appendChild(zoomIn);
+    controls.appendChild(zoomReset);
+    container.appendChild(controls);
+
+    // Viewport (clips overflow, handles pan)
+    const viewport = doc.createElement("div");
+    viewport.className = "zt-mm-viewport";
+
+    // Canvas (transforms with scale/translate)
+    const canvas = doc.createElement("div");
+    canvas.className = "zt-mm-canvas";
+
+    function applyTransform() {
+      canvas.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+      zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+    }
+
+    zoomIn.addEventListener("click", () => { scale = Math.min(scale + 0.15, 3); applyTransform(); });
+    zoomOut.addEventListener("click", () => { scale = Math.max(scale - 0.15, 0.2); applyTransform(); });
+    zoomReset.addEventListener("click", () => { scale = 0.8; panX = 0; panY = 0; applyTransform(); });
+
+    // Mouse wheel zoom
+    viewport.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.08 : 0.08;
+      scale = Math.min(Math.max(scale + delta, 0.2), 3);
+      applyTransform();
+    });
+
+    // Pan with mouse drag
+    viewport.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".zt-mm-node")) return; // don't pan when clicking nodes
+      isPanning = true;
+      startX = e.clientX - panX;
+      startY = e.clientY - panY;
+      viewport.style.cursor = "grabbing";
+    });
+
+    viewport.addEventListener("mousemove", (e) => {
+      if (!isPanning) return;
+      panX = e.clientX - startX;
+      panY = e.clientY - startY;
+      applyTransform();
+    });
+
+    viewport.addEventListener("mouseup", () => { isPanning = false; viewport.style.cursor = "grab"; });
+    viewport.addEventListener("mouseleave", () => { isPanning = false; viewport.style.cursor = "grab"; });
+
+    // Build the mind map tree
     const root = doc.createElement("div");
     root.className = "zt-mm-root";
 
-    // Root node
     const rootNode = doc.createElement("div");
     rootNode.className = "zt-mm-node zt-mm-depth-root";
     rootNode.textContent = fw.title || "Untitled";
     root.appendChild(rootNode);
 
-    // Children
     if (fw.children?.length) {
       const childrenEl = doc.createElement("div");
       childrenEl.className = "zt-mm-children";
@@ -420,13 +495,12 @@ class ZhuteroPlugin {
       root.appendChild(childrenEl);
     }
 
-    mmContainer.appendChild(root);
-    container.appendChild(mmContainer);
+    canvas.appendChild(root);
+    viewport.appendChild(canvas);
+    container.appendChild(viewport);
 
-    // Center scroll
-    requestAnimationFrame(() => {
-      mmContainer.scrollLeft = (mmContainer.scrollWidth - mmContainer.clientWidth) / 2;
-    });
+    // Initial transform
+    applyTransform();
   }
 
   _createMindMapNode(node, doc, depth) {
@@ -440,7 +514,6 @@ class ZhuteroPlugin {
     const label = doc.createElement("span");
     label.className = "zt-mm-label";
     label.textContent = node.label || "";
-
     nodeEl.appendChild(label);
 
     if (node.page) {
@@ -448,8 +521,14 @@ class ZhuteroPlugin {
       page.className = "zt-mm-page";
       page.textContent = `p.${node.page}`;
       nodeEl.appendChild(page);
+    }
+
+    if (node.annotationKey || node.page) {
       nodeEl.style.cursor = "pointer";
-      nodeEl.addEventListener("click", () => this._navigateToPage(node.page));
+      nodeEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._navigateToNode(node);
+      });
     }
 
     branch.appendChild(nodeEl);
@@ -476,13 +555,11 @@ class ZhuteroPlugin {
     btn.disabled = true;
 
     try {
-      // Find the parent item (if item is an attachment, get its parent)
       let parentItem = item;
       if (item.isAttachment() && item.parentItemID) {
         parentItem = Zotero.Items.get(item.parentItemID);
       }
 
-      // Find the PDF attachment for building zotero://open-pdf links
       let pdfAttachment = null;
       if (item.isAttachment() && item.attachmentContentType === "application/pdf") {
         pdfAttachment = item;
@@ -491,16 +568,12 @@ class ZhuteroPlugin {
         for (const aid of attachmentIDs) {
           const att = Zotero.Items.get(aid);
           if (att.attachmentContentType === "application/pdf") {
-            pdfAttachment = att;
-            break;
+            pdfAttachment = att; break;
           }
         }
       }
 
-      // Build HTML note content
       const html = this._frameworkToHTML(this._framework, pdfAttachment, parentItem);
-
-      // Create a new Zotero note item
       const noteItem = new Zotero.Item("note");
       noteItem.parentID = parentItem.id;
       noteItem.libraryID = parentItem.libraryID;
@@ -508,189 +581,208 @@ class ZhuteroPlugin {
       await noteItem.saveTx();
 
       btn.textContent = "Exported!";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
-
-      Zotero.log(`[Zhutero] Framework exported as note for item ${parentItem.key}`);
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
     } catch (e) {
       Zotero.log(`[Zhutero] Export error: ${e.message}`, "error");
       btn.textContent = "Export failed";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 2000);
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
     }
   }
 
-  /**
-   * Convert framework tree to structured HTML for Zotero notes.
-   * Uses zotero://open-pdf links for page navigation.
-   * Output format works natively with Better Notes' outline & template system.
-   */
   _frameworkToHTML(fw, pdfAttachment, parentItem) {
-    const libraryID = parentItem.libraryID;
     const pdfKey = pdfAttachment?.key;
-
     let html = `<div data-schema-version="9">`;
-
-    // Title
     html += `<h1>${this._esc(fw.title || "Reading Framework")}</h1>\n`;
-
-    // Thesis
-    if (fw.thesis) {
-      html += `<blockquote><p>${this._esc(fw.thesis)}</p></blockquote>\n`;
-    }
-
-    // Metadata line
-    html += `<p><em>Generated by Zhutero on ${new Date().toLocaleDateString()}</em></p>\n`;
-    html += `<hr/>\n`;
-
-    // Render tree nodes as nested headings + lists
-    if (fw.children) {
-      fw.children.forEach((child) => {
-        html += this._nodeToHTML(child, 2, pdfKey, libraryID);
-      });
-    }
-
-    // Append Zhutero notes if any
-    if (this._notes?.length > 0) {
+    if (fw.thesis) html += `<blockquote><p>${this._esc(fw.thesis)}</p></blockquote>\n`;
+    html += `<p><em>Generated by Zhutero on ${new Date().toLocaleDateString()}</em></p>\n<hr/>\n`;
+    if (fw.children) fw.children.forEach((c) => { html += this._nodeToHTML(c, 2, pdfKey); });
+    if (this._notes?.length) {
       html += `<hr/>\n<h2>Notes</h2>\n`;
-      this._notes.forEach((note) => {
-        const nodeLabel = this._findNodeLabel(fw, note.node_id);
-        html += `<h3>${this._esc(nodeLabel || note.node_id)}</h3>\n`;
-        html += `<p>${this._esc(note.content)}</p>\n`;
+      this._notes.forEach((n) => {
+        const l = this._findNodeLabel(fw, n.node_id);
+        html += `<h3>${this._esc(l || n.node_id)}</h3>\n<p>${this._esc(n.content)}</p>\n`;
       });
     }
-
     html += `</div>`;
     return html;
   }
 
-  _nodeToHTML(node, headingLevel, pdfKey, libraryID) {
-    let html = "";
-    const hl = Math.min(headingLevel, 6);
-
-    // Page link
+  _nodeToHTML(node, hl, pdfKey) {
+    hl = Math.min(hl, 6);
     let pageLink = "";
     if (node.page && pdfKey) {
-      const uri = `zotero://open-pdf/library/items/${pdfKey}?page=${node.page}`;
-      pageLink = ` <a href="${uri}">(p.${node.page})</a>`;
+      pageLink = ` <a href="zotero://open-pdf/library/items/${pdfKey}?page=${node.page}">(p.${node.page})</a>`;
     } else if (node.page) {
       pageLink = ` (p.${node.page})`;
     }
-
-    // Node as heading
-    html += `<h${hl}>${this._esc(node.label || "")}${pageLink}</h${hl}>\n`;
-
-    // Summary as paragraph
-    if (node.summary) {
-      html += `<p>${this._esc(node.summary)}</p>\n`;
-    }
-
-    // Quotes as blockquotes
+    let html = `<h${hl}>${this._esc(node.label || "")}${pageLink}</h${hl}>\n`;
+    if (node.summary) html += `<p>${this._esc(node.summary)}</p>\n`;
     if (node.quotes?.length) {
       node.quotes.forEach((q) => {
-        let qLink = "";
-        if (q.page && pdfKey) {
-          const uri = `zotero://open-pdf/library/items/${pdfKey}?page=${q.page}`;
-          qLink = ` <a href="${uri}">(p.${q.page})</a>`;
-        }
-        html += `<blockquote><p>${this._esc(q.text)}${qLink}</p></blockquote>\n`;
+        let ql = q.page && pdfKey ? ` <a href="zotero://open-pdf/library/items/${pdfKey}?page=${q.page}">(p.${q.page})</a>` : "";
+        html += `<blockquote><p>${this._esc(q.text)}${ql}</p></blockquote>\n`;
       });
     }
-
-    // Children: if next level would exceed h6, use a list instead
     if (node.children?.length) {
-      if (headingLevel >= 6) {
+      if (hl >= 6) {
         html += `<ul>\n`;
-        node.children.forEach((child) => {
-          html += this._nodeToListHTML(child, pdfKey, libraryID);
-        });
+        node.children.forEach((c) => { html += this._nodeToListHTML(c, pdfKey); });
         html += `</ul>\n`;
       } else {
-        node.children.forEach((child) => {
-          html += this._nodeToHTML(child, headingLevel + 1, pdfKey, libraryID);
-        });
+        node.children.forEach((c) => { html += this._nodeToHTML(c, hl + 1, pdfKey); });
       }
     }
-
     return html;
   }
 
-  _nodeToListHTML(node, pdfKey, libraryID) {
-    let pageLink = "";
-    if (node.page && pdfKey) {
-      const uri = `zotero://open-pdf/library/items/${pdfKey}?page=${node.page}`;
-      pageLink = ` <a href="${uri}">(p.${node.page})</a>`;
-    }
-
-    let html = `<li><strong>${this._esc(node.label || "")}</strong>${pageLink}`;
-    if (node.summary) {
-      html += ` — ${this._esc(node.summary)}`;
-    }
-
+  _nodeToListHTML(node, pdfKey) {
+    let pl = node.page && pdfKey ? ` <a href="zotero://open-pdf/library/items/${pdfKey}?page=${node.page}">(p.${node.page})</a>` : "";
+    let html = `<li><strong>${this._esc(node.label || "")}</strong>${pl}`;
+    if (node.summary) html += ` — ${this._esc(node.summary)}`;
     if (node.children?.length) {
       html += `\n<ul>\n`;
-      node.children.forEach((child) => {
-        html += this._nodeToListHTML(child, pdfKey, libraryID);
-      });
+      node.children.forEach((c) => { html += this._nodeToListHTML(c, pdfKey); });
       html += `</ul>\n`;
     }
-
-    html += `</li>\n`;
-    return html;
+    return html + `</li>\n`;
   }
 
   _findNodeLabel(fw, nodeId) {
-    function search(node) {
-      if (node.id === nodeId) return node.label;
-      if (node.children) {
-        for (const child of node.children) {
-          const result = search(child);
-          if (result) return result;
-        }
-      }
-      return null;
-    }
-    if (fw.children) {
-      for (const child of fw.children) {
-        const result = search(child);
-        if (result) return result;
-      }
-    }
+    function s(n) { if (n.id === nodeId) return n.label; if (n.children) for (const c of n.children) { const r = s(c); if (r) return r; } return null; }
+    if (fw.children) for (const c of fw.children) { const r = s(c); if (r) return r; }
     return null;
   }
 
   // ── Navigation ──
 
-  _navigateToPage(pageNum) {
-    // Navigate Zotero's PDF reader to the specified page
+  async _navigateToNode(node) {
+    if (!node.page) return;
+
     try {
-      const reader = Zotero.Reader.getByTabID(Zotero_Tabs.selectedID);
-      if (reader) {
-        reader.navigate({ pageIndex: pageNum - 1 });
+      let reader;
+      try { reader = Zotero.Reader.getByTabID(Zotero_Tabs.selectedID); } catch (e) {}
+      if (!reader && Zotero.Reader._readers?.length) {
+        reader = Zotero.Reader._readers[0];
       }
+
+      if (!reader) return;
+
+      const pageIndex = node.page - 1;
+
+      // Try to find precise text position using reader's internal pdf.js
+      const searchText = node.quotes?.[0]?.text || node.label || "";
+      if (searchText) {
+        try {
+          const position = await this._findTextPosition(reader, pageIndex, searchText);
+          if (position) {
+            // navigate({ position }) scrolls to the rects AND flashes a 2-sec highlight
+            reader.navigate({ position });
+            return;
+          }
+        } catch (e) {
+          Zotero.log("[Zhutero] Text position search failed: " + e.message, "warning");
+        }
+      }
+
+      // Fallback: just jump to the page
+      reader.navigate({ pageIndex });
     } catch (e) {
       Zotero.log(`[Zhutero] Navigate error: ${e.message}`, "warning");
     }
   }
 
+  /**
+   * Find the precise position (rects) of text on a PDF page using
+   * the reader's internal pdf.js character data.
+   */
+  async _findTextPosition(reader, pageIndex, searchText) {
+    // Access the reader's internal pdf.js via iframe
+    const iframeWin = reader._iframeWindow;
+    if (!iframeWin) return null;
+
+    const internalReader = iframeWin.wrappedJSObject?._reader
+      || iframeWin._reader;
+    if (!internalReader) return null;
+
+    const pdfView = internalReader._primaryView || internalReader._lastView;
+    if (!pdfView) return null;
+
+    // Get page character data from pdf.js
+    let pageData;
+    try {
+      const pdfApp = pdfView._iframeWindow?.PDFViewerApplication
+        || pdfView._iframeWindow?.wrappedJSObject?.PDFViewerApplication;
+      if (!pdfApp?.pdfDocument) return null;
+      pageData = await pdfApp.pdfDocument.getPageData({ pageIndex });
+    } catch (e) {
+      return null;
+    }
+
+    if (!pageData?.chars?.length) return null;
+    const chars = pageData.chars;
+
+    // Build page text from chars
+    let text = "";
+    const charOffsets = []; // maps text offset -> char index
+    for (let i = 0; i < chars.length; i++) {
+      const c = chars[i];
+      const ch = c.u || c.c || "";
+      charOffsets.push(i);
+      text += ch;
+      if (c.spaceAfter || c.lineBreakAfter || c.paragraphBreakAfter) {
+        text += " ";
+        // space doesn't map to a char, but we track it
+        charOffsets.push(i);
+      }
+    }
+
+    // Search for the text (use first 100 chars for matching)
+    const needle = searchText.slice(0, 100);
+    let idx = text.indexOf(needle);
+    if (idx < 0) idx = text.toLowerCase().indexOf(needle.toLowerCase());
+    if (idx < 0) return null;
+
+    // Map text offsets back to char indices
+    const startCharIdx = charOffsets[idx] || 0;
+    const endCharIdx = charOffsets[Math.min(idx + needle.length - 1, charOffsets.length - 1)] || startCharIdx;
+
+    // Build rects grouped by line
+    const rects = [];
+    let lineRect = null;
+    const Y_TOL = 3;
+
+    for (let i = startCharIdx; i <= endCharIdx && i < chars.length; i++) {
+      const r = chars[i].rect || chars[i].inlineRect;
+      if (!r) continue;
+
+      if (!lineRect) {
+        lineRect = [r[0], r[1], r[2], r[3]];
+      } else if (Math.abs(r[1] - lineRect[1]) < Y_TOL) {
+        // Same line
+        lineRect[0] = Math.min(lineRect[0], r[0]);
+        lineRect[1] = Math.min(lineRect[1], r[1]);
+        lineRect[2] = Math.max(lineRect[2], r[2]);
+        lineRect[3] = Math.max(lineRect[3], r[3]);
+      } else {
+        rects.push([...lineRect]);
+        lineRect = [r[0], r[1], r[2], r[3]];
+      }
+    }
+    if (lineRect) rects.push(lineRect);
+
+    if (rects.length === 0) return null;
+
+    return { pageIndex, rects };
+  }
+
   // ── Utilities ──
 
   _esc(str) {
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
   destroy() {
-    try {
-      Zotero.ItemPaneManager.unregisterSection(this._tabId);
-    } catch (e) {}
+    try { Zotero.ItemPaneManager.unregisterSection(this._tabId); } catch (e) {}
     Zotero.log("[Zhutero] Plugin destroyed");
   }
 }
