@@ -7,6 +7,7 @@
 /* globals chatCompletion, generateFramework, getItemFullText, parseLLMJson */
 /* globals createAnnotationsForFramework, removeZhuteroAnnotations */
 /* globals getFramework, saveFramework, getNotes, saveNote */
+/* globals loadUserAnnotations, groupAnnotationsByNode */
 
 class ZhuteroPlugin {
   constructor() {
@@ -18,6 +19,9 @@ class ZhuteroPlugin {
     this._framework = null;
     this._notes = [];
     this._activeView = "tree";
+    this._userAnnotations = [];   // raw user annotations from PDF
+    this._annotationsByNode = new Map(); // node.id -> annotations[]
+    this._showAnnotations = true;
   }
 
   async init({ id, version, rootURI }) {
@@ -75,6 +79,15 @@ class ZhuteroPlugin {
         this._framework = null;
         this._notes = [];
         Zotero.log("[Zhutero] Failed to load data: " + e.message, "warning");
+      }
+
+      try {
+        this._userAnnotations = await loadUserAnnotations(item);
+        this._annotationsByNode = groupAnnotationsByNode(this._framework, this._userAnnotations);
+      } catch (e) {
+        this._userAnnotations = [];
+        this._annotationsByNode = new Map();
+        Zotero.log("[Zhutero] Failed to load user annotations: " + e.message, "warning");
       }
 
       this._injectCSS(body);
@@ -142,6 +155,31 @@ class ZhuteroPlugin {
     if (!this._framework) exportBtn.disabled = true;
     exportBtn.addEventListener("click", () => this._handleExportToNote(doc, item, exportBtn));
 
+    const createAnnBtn = doc.createElement("button");
+    createAnnBtn.className = "zt-btn";
+    createAnnBtn.textContent = "Create Annotations";
+    createAnnBtn.title = "Create gray PDF highlights for the current framework";
+    if (!this._framework) createAnnBtn.disabled = true;
+    createAnnBtn.addEventListener("click", async () => {
+      const original = createAnnBtn.textContent;
+      createAnnBtn.disabled = true;
+      try {
+        createAnnBtn.textContent = "Cleaning old...";
+        await removeZhuteroAnnotations(item);
+        await createAnnotationsForFramework(
+          this._framework, item,
+          (msg) => { createAnnBtn.textContent = msg; }
+        );
+        createAnnBtn.textContent = "Saving...";
+        await saveFramework(this._currentItemKey, this._framework);
+        if (this._panelBody) await this._renderPanel(this._panelBody, item);
+      } catch (e) {
+        Zotero.log(`[Zhutero] Create annotations error: ${e.message}`, "error");
+        createAnnBtn.textContent = "Failed";
+        setTimeout(() => { createAnnBtn.textContent = original; createAnnBtn.disabled = false; }, 2000);
+      }
+    });
+
     const cleanBtn = doc.createElement("button");
     cleanBtn.className = "zt-btn";
     cleanBtn.textContent = "Clean Annotations";
@@ -153,9 +191,25 @@ class ZhuteroPlugin {
       setTimeout(() => { cleanBtn.textContent = "Clean Annotations"; }, 1500);
     });
 
+    const exportJsonBtn = doc.createElement("button");
+    exportJsonBtn.className = "zt-btn";
+    exportJsonBtn.textContent = "Export JSON";
+    exportJsonBtn.title = "Save framework + notes as JSON file";
+    if (!this._framework) exportJsonBtn.disabled = true;
+    exportJsonBtn.addEventListener("click", () => this._handleExportJson(doc, item, exportJsonBtn));
+
+    const importJsonBtn = doc.createElement("button");
+    importJsonBtn.className = "zt-btn";
+    importJsonBtn.textContent = "Import JSON";
+    importJsonBtn.title = "Load framework from JSON file";
+    importJsonBtn.addEventListener("click", () => this._handleImportJson(doc, item, importJsonBtn));
+
     bar.appendChild(genBtn);
+    bar.appendChild(createAnnBtn);
     bar.appendChild(exportBtn);
     bar.appendChild(cleanBtn);
+    bar.appendChild(exportJsonBtn);
+    bar.appendChild(importJsonBtn);
     return bar;
   }
 
@@ -185,6 +239,29 @@ class ZhuteroPlugin {
       });
       bar.appendChild(btn);
     });
+
+    // Spacer + Annotations toggle
+    if (this._userAnnotations.length > 0) {
+      const spacer = doc.createElement("span");
+      spacer.style.flex = "1";
+      bar.appendChild(spacer);
+
+      const annBtn = doc.createElement("button");
+      annBtn.className = "zt-view-btn zt-ann-toggle";
+      annBtn.textContent = this._showAnnotations
+        ? `Hide Annotations (${this._userAnnotations.length})`
+        : `Show Annotations (${this._userAnnotations.length})`;
+      annBtn.title = "Show/hide your manual highlights and comments";
+      annBtn.addEventListener("click", () => {
+        this._showAnnotations = !this._showAnnotations;
+        annBtn.textContent = this._showAnnotations
+          ? `Hide Annotations (${this._userAnnotations.length})`
+          : `Show Annotations (${this._userAnnotations.length})`;
+        const content = doc.getElementById("zt-content");
+        if (content) this._renderView(content, doc);
+      });
+      bar.appendChild(annBtn);
+    }
 
     return bar;
   }
@@ -332,6 +409,19 @@ class ZhuteroPlugin {
       el.appendChild(summary);
     }
 
+    // User annotations attached to this node
+    const userAnns = this._showAnnotations ? this._annotationsByNode.get(node.id) : null;
+    if (userAnns?.length) {
+      const annsEl = doc.createElement("div");
+      annsEl.className = "zt-user-anns";
+      annsEl.style.marginLeft = `${depth * 16 + 20}px`;
+      if (collapsed) annsEl.style.display = "none";
+      userAnns.forEach((ann) => {
+        annsEl.appendChild(this._createAnnotationEl(ann, doc));
+      });
+      el.appendChild(annsEl);
+    }
+
     if (hasChildren) {
       const childrenEl = doc.createElement("div");
       childrenEl.className = "zt-tree-children";
@@ -347,6 +437,8 @@ class ZhuteroPlugin {
         childrenEl.style.display = collapsed ? "none" : "";
         const sum = el.querySelector(":scope > .zt-tree-summary");
         if (sum) sum.style.display = collapsed ? "none" : "";
+        const anns = el.querySelector(":scope > .zt-user-anns");
+        if (anns) anns.style.display = collapsed ? "none" : "";
       });
     }
 
@@ -545,6 +637,105 @@ class ZhuteroPlugin {
     return branch;
   }
 
+  // ── Import / Export Framework JSON ──
+
+  async _handleExportJson(doc, item, btn) {
+    if (!this._framework) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+
+    try {
+      const win = Zotero.getMainWindow();
+      const fp = Components.classes["@mozilla.org/filepicker;1"]
+        .createInstance(Components.interfaces.nsIFilePicker);
+      fp.init(win, "Export Zhutero Framework", Components.interfaces.nsIFilePicker.modeSave);
+      fp.appendFilter("JSON files", "*.json");
+      const titleSafe = (this._framework.title || item.getDisplayTitle?.() || "framework")
+        .replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").slice(0, 60);
+      fp.defaultString = `zhutero_${titleSafe}.json`;
+
+      const rv = await new Promise((resolve) => fp.open(resolve));
+      const FP = Components.interfaces.nsIFilePicker;
+      if (rv !== FP.returnOK && rv !== FP.returnReplace) {
+        btn.disabled = false;
+        return;
+      }
+
+      const payload = {
+        zhuteroVersion: this.version,
+        exportedAt: new Date().toISOString(),
+        sourceItemKey: this._currentItemKey,
+        sourceItemTitle: item.getDisplayTitle?.() || null,
+        framework: this._framework,
+        notes: this._notes || [],
+      };
+      await IOUtils.writeUTF8(fp.file.path, JSON.stringify(payload, null, 2));
+
+      btn.textContent = "Exported!";
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
+    } catch (e) {
+      Zotero.log(`[Zhutero] Export JSON error: ${e.message}`, "error");
+      btn.textContent = "Export failed";
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
+    }
+  }
+
+  async _handleImportJson(doc, item, btn) {
+    const originalText = btn.textContent;
+    btn.disabled = true;
+
+    try {
+      const win = Zotero.getMainWindow();
+      const fp = Components.classes["@mozilla.org/filepicker;1"]
+        .createInstance(Components.interfaces.nsIFilePicker);
+      fp.init(win, "Import Zhutero Framework", Components.interfaces.nsIFilePicker.modeOpen);
+      fp.appendFilter("JSON files", "*.json");
+
+      const rv = await new Promise((resolve) => fp.open(resolve));
+      const FP = Components.interfaces.nsIFilePicker;
+      if (rv !== FP.returnOK) {
+        btn.disabled = false;
+        return;
+      }
+
+      const raw = await IOUtils.readUTF8(fp.file.path);
+      const payload = JSON.parse(raw);
+      const framework = payload.framework || payload;
+      if (!framework || typeof framework !== "object" || !framework.children) {
+        throw new Error("Invalid framework JSON: missing 'children' array");
+      }
+
+      // Confirm if existing framework will be overwritten
+      if (this._framework) {
+        const ok = Services.prompt.confirm(
+          win, "Replace existing framework?",
+          "This item already has a framework. Importing will replace it and rebuild PDF annotations. Continue?"
+        );
+        if (!ok) { btn.disabled = false; btn.textContent = originalText; return; }
+      }
+
+      this._framework = framework;
+
+      btn.textContent = "Saving...";
+      await saveFramework(this._currentItemKey, framework);
+
+      btn.textContent = "Annotating...";
+      await removeZhuteroAnnotations(item);
+      await createAnnotationsForFramework(framework, item);
+
+      if (this._panelBody) {
+        await this._renderPanel(this._panelBody, item);
+      }
+
+      btn.textContent = "Imported!";
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
+    } catch (e) {
+      Zotero.log(`[Zhutero] Import JSON error: ${e.message}`, "error");
+      btn.textContent = "Import failed";
+      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
+    }
+  }
+
   // ── Export to Zotero Note (Better Notes compatible) ──
 
   async _handleExportToNote(doc, item, btn) {
@@ -654,6 +845,52 @@ class ZhuteroPlugin {
   }
 
   // ── Navigation ──
+
+  _createAnnotationEl(ann, doc) {
+    const wrap = doc.createElement("div");
+    wrap.className = "zt-user-ann";
+    wrap.style.borderLeftColor = ann.color;
+    wrap.title = `Page ${ann.pageIndex + 1} — click to open`;
+
+    if (ann.text) {
+      const text = doc.createElement("div");
+      text.className = "zt-user-ann-text";
+      text.textContent = ann.text;
+      wrap.appendChild(text);
+    }
+    if (ann.comment) {
+      const comm = doc.createElement("div");
+      comm.className = "zt-user-ann-comment";
+      comm.textContent = ann.comment;
+      wrap.appendChild(comm);
+    }
+
+    wrap.addEventListener("click", () => this._navigateToAnnotation(ann));
+    return wrap;
+  }
+
+  async _navigateToAnnotation(ann) {
+    try {
+      let reader;
+      try { reader = Zotero.Reader.getByTabID(Zotero_Tabs.selectedID); } catch (e) {}
+      if (!reader && Zotero.Reader._readers?.length) {
+        reader = Zotero.Reader._readers[0];
+      }
+      if (!reader) return;
+
+      const annItem = Zotero.Items.get(ann.itemId);
+      if (annItem) {
+        const pos = JSON.parse(annItem.annotationPosition || "{}");
+        if (pos.pageIndex != null && pos.rects?.length) {
+          reader.navigate({ position: pos });
+          return;
+        }
+      }
+      reader.navigate({ pageIndex: ann.pageIndex });
+    } catch (e) {
+      Zotero.log(`[Zhutero] Navigate annotation error: ${e.message}`, "warning");
+    }
+  }
 
   async _navigateToNode(node) {
     if (!node.page) return;

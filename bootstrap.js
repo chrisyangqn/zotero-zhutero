@@ -22,6 +22,7 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
   Services.scriptloader.loadSubScript(rootURI + "src/llm.js");
   Services.scriptloader.loadSubScript(rootURI + "src/framework.js");
   Services.scriptloader.loadSubScript(rootURI + "src/storage.js");
+  Services.scriptloader.loadSubScript(rootURI + "src/userAnnotations.js");
   Services.scriptloader.loadSubScript(rootURI + "content/zhutero.js");
 
   Zhutero = new ZhuteroPlugin();

@@ -218,7 +218,7 @@ async function getItemFullText(itemID) {
  * @param {Zotero.Item} item - The parent or attachment item
  * @returns {Promise<object>} framework with annotationKey fields
  */
-async function createAnnotationsForFramework(framework, item) {
+async function createAnnotationsForFramework(framework, item, onProgress) {
   // Find the PDF attachment
   let attachment;
   if (item.isAttachment() && item.attachmentContentType === "application/pdf") {
@@ -238,16 +238,28 @@ async function createAnnotationsForFramework(framework, item) {
     return framework;
   }
 
+  // Determine max page actually referenced in framework — avoid scanning whole PDF
+  let maxPage = 1;
+  function findMaxPage(node) {
+    if (node.page && node.page > maxPage) maxPage = node.page;
+    if (node.quotes) {
+      for (const q of node.quotes) if (q.page && q.page > maxPage) maxPage = q.page;
+    }
+    if (node.children) for (const c of node.children) findMaxPage(c);
+  }
+  if (framework.children) for (const c of framework.children) findMaxPage(c);
+
+  if (onProgress) onProgress("Reading PDF...");
+
   // Extract per-page character positions from PDF for precise highlighting
   let pageChars = []; // pageChars[pageIndex] = [{str, x, y, w, h}, ...]
   try {
     const pdfPath = await attachment.getFilePathAsync();
     if (pdfPath) {
       const data = await IOUtils.read(pdfPath);
-      // Use Zotero's PDFWorker to get character-level data
       const result = await Zotero.PDFWorker._query(
         "getFullText",
-        { buf: data.buffer, maxPages: 999 },
+        { buf: data.buffer, maxPages: maxPage },
         [data.buffer]
       );
       if (result?.pageChars) {
@@ -259,24 +271,72 @@ async function createAnnotationsForFramework(framework, item) {
   }
 
   /**
-   * Find bounding rects for a text string on a given page.
-   * Returns array of [x1, y1, x2, y2] rects, or null if not found.
+   * Normalize text for fuzzy matching: collapse whitespace, lowercase,
+   * keep only ascii letters/digits.
+   */
+  function normalize(s) {
+    return (s || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .replace(/[^a-z0-9 ]/g, "");
+  }
+
+  /**
+   * Build a flattened "normalized" page text plus an index map back to
+   * the original char positions in pageChars[pageIndex]. Cached per page.
+   */
+  const pageIndexCache = new Map();
+  function getNormalizedPage(pageIndex) {
+    if (pageIndexCache.has(pageIndex)) return pageIndexCache.get(pageIndex);
+    const chars = pageChars[pageIndex];
+    if (!chars) { pageIndexCache.set(pageIndex, null); return null; }
+
+    let normText = "";
+    const map = []; // normText[i] -> chars index
+    let lastWasSpace = true; // collapse leading space
+    for (let i = 0; i < chars.length; i++) {
+      const raw = chars[i].c || chars[i].char || chars[i].str || "";
+      for (const ch of raw) {
+        const lower = ch.toLowerCase();
+        if (/\s/.test(lower)) {
+          if (!lastWasSpace) { normText += " "; map.push(i); lastWasSpace = true; }
+        } else if (/[a-z0-9]/.test(lower)) {
+          normText += lower; map.push(i); lastWasSpace = false;
+        }
+        // skip punctuation/symbols — they often differ between LLM quote and PDF
+      }
+    }
+    const result = { normText, map };
+    pageIndexCache.set(pageIndex, result);
+    return result;
+  }
+
+  /**
+   * Find bounding rects for a text string on a given page using
+   * fuzzy normalized matching. Tries progressively shorter prefixes.
    */
   function findTextRects(pageIndex, searchText) {
     if (!pageChars[pageIndex] || !searchText) return null;
+    const page = getNormalizedPage(pageIndex);
+    if (!page) return null;
 
-    const chars = pageChars[pageIndex];
-    // Build page text from chars
-    const pageText = chars.map(c => c.c || c.char || c.str || "").join("");
-    const needle = searchText.slice(0, 80); // use first 80 chars for matching
-    const idx = pageText.indexOf(needle);
-    if (idx < 0) {
-      // Try case-insensitive
-      const idxCI = pageText.toLowerCase().indexOf(needle.toLowerCase());
-      if (idxCI < 0) return null;
-      return buildRects(chars, idxCI, idxCI + needle.length);
+    const needleFull = normalize(searchText);
+    if (!needleFull) return null;
+
+    // Try progressively shorter prefixes — LLM quotes often have minor
+    // character drift partway through, but the start usually matches.
+    const lengths = [needleFull.length, 60, 40, 25, 15];
+    for (const len of lengths) {
+      const needle = needleFull.slice(0, Math.min(len, needleFull.length));
+      if (needle.length < 8) continue; // too short, false positives
+      const idx = page.normText.indexOf(needle);
+      if (idx >= 0) {
+        const startCharIdx = page.map[idx];
+        const endCharIdx = page.map[Math.min(idx + needle.length - 1, page.map.length - 1)];
+        return buildRects(pageChars[pageIndex], startCharIdx, endCharIdx + 1);
+      }
     }
-    return buildRects(chars, idx, idx + needle.length);
+    return null;
   }
 
   function buildRects(chars, startIdx, endIdx) {
@@ -307,77 +367,71 @@ async function createAnnotationsForFramework(framework, item) {
     return rects.length > 0 ? rects : null;
   }
 
-  // Recursively create highlight annotations for each node
-  async function processNode(node, sortIdx) {
+  // First pass: collect all (node, sortIdx, rects, highlightText) tuples
+  const tasks = [];
+  function collect(node, sortIdx) {
     if (node.page) {
-      try {
-        const pageIdx = node.page - 1;
+      const pageIdx = node.page - 1;
+      let highlightText = node.label || "";
+      let rects = null;
 
-        // Try to find precise text rects from quotes
-        let highlightText = node.label || "";
-        let rects = null;
-
-        if (node.quotes?.length) {
-          for (const q of node.quotes) {
-            const qPage = (q.page || node.page) - 1;
-            rects = findTextRects(qPage, q.text);
-            if (rects) {
-              highlightText = q.text;
-              break;
-            }
-          }
+      if (node.quotes?.length) {
+        for (const q of node.quotes) {
+          const qPage = (q.page || node.page) - 1;
+          rects = findTextRects(qPage, q.text);
+          if (rects) { highlightText = q.text; break; }
         }
-
-        // Fallback: try finding the node label on the page
-        if (!rects) {
-          rects = findTextRects(pageIdx, node.label);
-        }
-
-        // Last fallback: place at a default position
-        if (!rects) {
-          const yPos = 700 - (sortIdx % 8) * 30;
-          rects = [[72, yPos, 400, yPos + 12]];
-        }
-
-        const typeColors = {
-          chapter: "#5fb7d4",   // blue
-          argument: "#5bc68a",  // green
-          subpoint: "#f5c542",  // yellow
-        };
-
-        const annotation = new Zotero.Item("annotation");
-        annotation.parentID = attachment.id;
-        annotation.libraryID = attachment.libraryID;
-        annotation.annotationType = "highlight";
-        annotation.annotationColor = typeColors[node.type] || "#aaaaaa";
-        annotation.annotationText = highlightText;
-        annotation.annotationComment =
-          `[Zhutero] ${node.label || ""}\n\n${node.summary || ""}`;
-        annotation.annotationPosition = JSON.stringify({
-          pageIndex: pageIdx,
-          rects: rects,
-        });
-        annotation.annotationSortIndex =
-          String(node.page).padStart(5, "0") + "|" +
-          String(sortIdx).padStart(6, "0") + "|00000";
-
-        await annotation.saveTx();
-        node.annotationKey = annotation.key;
-      } catch (e) {
-        Zotero.log(`[Zhutero] Failed to create annotation for "${node.label}": ${e.message}`, "warning");
       }
+      if (!rects) rects = findTextRects(pageIdx, node.label);
+      if (!rects) {
+        const yPos = 700 - (sortIdx % 8) * 30;
+        rects = [[72, yPos, 400, yPos + 12]];
+      }
+      tasks.push({ node, sortIdx, pageIdx, rects, highlightText });
     }
     if (node.children) {
       for (let i = 0; i < node.children.length; i++) {
-        await processNode(node.children[i], sortIdx * 10 + i);
+        collect(node.children[i], sortIdx * 10 + i);
       }
     }
   }
-
   if (framework.children) {
     for (let i = 0; i < framework.children.length; i++) {
-      await processNode(framework.children[i], i);
+      collect(framework.children[i], i);
     }
+  }
+
+  if (onProgress) onProgress(`Creating ${tasks.length} annotations...`);
+
+  // Single batched transaction — much faster than per-node saveTx
+  try {
+    await Zotero.DB.executeTransaction(async () => {
+      for (const t of tasks) {
+        try {
+          const annotation = new Zotero.Item("annotation");
+          annotation.parentID = attachment.id;
+          annotation.libraryID = attachment.libraryID;
+          annotation.annotationType = "highlight";
+          annotation.annotationColor = "#aaaaaa";
+          annotation.annotationText = t.highlightText;
+          annotation.annotationComment =
+            `[Zhutero] ${t.node.label || ""}\n\n${t.node.summary || ""}`;
+          annotation.annotationPosition = JSON.stringify({
+            pageIndex: t.pageIdx,
+            rects: t.rects,
+          });
+          annotation.annotationSortIndex =
+            String(t.node.page).padStart(5, "0") + "|" +
+            String(t.sortIdx).padStart(6, "0") + "|00000";
+          await annotation.save();
+          t.node.annotationKey = annotation.key;
+        } catch (e) {
+          Zotero.log(`[Zhutero] Failed annotation "${t.node.label}": ${e.message}`, "warning");
+        }
+      }
+    });
+  } catch (e) {
+    Zotero.log(`[Zhutero] Transaction failed: ${e.message}`, "error");
   }
 
   return framework;

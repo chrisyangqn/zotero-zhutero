@@ -347,3 +347,44 @@
   border-radius: 3px;
   border: 1px solid var(--zt-border);
 }
+
+/* ── User Annotations (manual highlights/comments) ── */
+.zt-ann-toggle {
+  flex: 0 0 auto !important;
+  padding: 5px 10px !important;
+  border-left: 1px solid var(--zt-border);
+}
+
+.zt-user-anns {
+  margin-top: 4px;
+  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.zt-user-ann {
+  border-left: 3px solid #ffd400;
+  background: var(--zt-bg-card);
+  padding: 5px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.4;
+  transition: background 0.12s;
+}
+
+.zt-user-ann:hover {
+  background: var(--zt-primary-light);
+}
+
+.zt-user-ann-text {
+  color: var(--zt-text);
+  font-style: italic;
+}
+
+.zt-user-ann-comment {
+  margin-top: 3px;
+  color: var(--zt-text-heading);
+  font-weight: 500;
+}

@@ -26,6 +26,7 @@ const include = [
   "src/llm.js",
   "src/framework.js",
   "src/storage.js",
+  "src/userAnnotations.js",
   "locale/en-US/zhutero.ftl",
   "locale/zh-CN/zhutero.ftl",
 ];
