@@ -126,25 +126,147 @@ function parseLLMJson(text) {
  * @param {function} [onProgress] - Optional progress callback
  * @returns {Promise<{ framework: object, usage: object }>}
  */
+// Conservative char threshold for a single LLM call. CJK content is denser
+// (≈1 char/token), so we can't go close to the 200K-token API limit.
+// 140K chars ≈ 140K tokens for Chinese, ≈ 35-50K tokens for English — both safe.
+const SINGLE_CALL_CHAR_LIMIT = 140000;
+
+const CHAPTER_PROMPT = `You are analyzing ONE chapter of a book or document. Generate a JSON node representing this single chapter and its sub-structure.
+
+Return ONLY valid JSON in this shape (no array, no wrapper):
+{
+  "id": "c<N>",
+  "label": "<chapter title>",
+  "type": "chapter",
+  "page": <chapter number>,
+  "summary": "1-2 sentence summary of this chapter",
+  "quotes": [
+    { "page": <N>, "text": "EXACT heading from source", "type": "heading" }
+  ],
+  "children": [
+    {
+      "id": "c<N>s1",
+      "label": "Subsection",
+      "type": "argument",
+      "page": <N>,
+      "summary": "...",
+      "quotes": [{ "page": <N>, "text": "EXACT verbatim sentence", "type": "content" }],
+      "children": []
+    }
+  ]
+}
+
+Rules:
+- "page" should be the CHAPTER NUMBER (the N in "=== CHAPTER N ===") for every node in this chapter
+- quotes MUST be VERBATIM substrings of the input
+- Capture the chapter's main arguments as children; nest sub-points if helpful
+- Output MUST be valid JSON; escape inner quotes; no trailing commas
+- Be concise — summaries 1-2 sentences each`;
+
 async function generateFramework(fullText, chatCompletion, onProgress) {
-  Zotero.debug(`[Zhutero/FW] generateFramework: input=${fullText.length}c`);
-  if (onProgress) onProgress("Sending to LLM...");
+  Zotero.debug(`[Zhutero/FW] generateFramework: input=${fullText.length}c (limit ${SINGLE_CALL_CHAR_LIMIT})`);
 
-  const tLLM = Date.now();
-  const { text, usage } = await chatCompletion(
-    FRAMEWORK_PROMPT,
-    `Generate a reading framework for this document. The text below has page numbers marked as "=== PAGE N ===".\n\n${fullText}`,
-    { maxTokens: 16000 }
-  );
-  Zotero.debug(`[Zhutero/FW] LLM finished in ${Date.now() - tLLM}ms`);
+  // If input is small enough, single call.
+  if (fullText.length <= SINGLE_CALL_CHAR_LIMIT) {
+    if (onProgress) onProgress("Sending to LLM...");
+    const tLLM = Date.now();
+    const { text, usage } = await chatCompletion(
+      FRAMEWORK_PROMPT,
+      `Generate a reading framework for this document. The text below has page numbers marked as "=== PAGE N ===".\n\n${fullText}`,
+      { maxTokens: 16000 }
+    );
+    Zotero.debug(`[Zhutero/FW] LLM finished in ${Date.now() - tLLM}ms`);
 
-  if (onProgress) onProgress("Parsing response...");
+    if (onProgress) onProgress("Parsing response...");
+    const tParse = Date.now();
+    const framework = parseLLMJson(text);
+    Zotero.debug(`[Zhutero/FW] Parsed in ${Date.now() - tParse}ms nodes=${countNodes(framework)}`);
+    return { framework, usage };
+  }
 
-  const tParse = Date.now();
-  const framework = parseLLMJson(text);
-  Zotero.debug(`[Zhutero/FW] Parsed in ${Date.now() - tParse}ms ` +
-    `nodes=${countNodes(framework)} title="${framework?.title?.slice(0, 60) || ""}"`);
-  return { framework, usage };
+  // Too big — must chunk. Try splitting by chapter markers (EPUB).
+  const chunks = splitByChapter(fullText);
+  if (!chunks.length) {
+    throw new Error(
+      `Document is too large (${fullText.length} chars) and has no chapter markers to split on. ` +
+      `Reduce input or use a model with larger context.`
+    );
+  }
+  Zotero.debug(`[Zhutero/FW] Chunked into ${chunks.length} chapters`);
+
+  // Reject any individual chapter that itself exceeds the per-call budget.
+  const tooBig = chunks.find(c => c.text.length > SINGLE_CALL_CHAR_LIMIT);
+  if (tooBig) {
+    throw new Error(
+      `Chapter "${tooBig.title}" is too large (${tooBig.text.length} chars) for a single LLM call.`
+    );
+  }
+
+  const chapterNodes = [];
+  const totalUsage = { input_tokens: 0, output_tokens: 0 };
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (onProgress) onProgress(`Chapter ${i + 1}/${chunks.length}...`);
+    Zotero.debug(`[Zhutero/FW] Chapter ${i + 1}/${chunks.length} "${c.title}" ${c.text.length}c`);
+    const tCh = Date.now();
+    try {
+      const { text, usage } = await chatCompletion(
+        CHAPTER_PROMPT,
+        c.text,
+        { maxTokens: 4000 }
+      );
+      const node = parseLLMJson(text);
+      // Force chapter numbering to match source order
+      node.id = node.id || `c${c.chapterNum}`;
+      node.page = c.chapterNum;
+      chapterNodes.push(node);
+      totalUsage.input_tokens += usage?.input_tokens || 0;
+      totalUsage.output_tokens += usage?.output_tokens || 0;
+      Zotero.debug(`[Zhutero/FW] Chapter ${i + 1} done in ${Date.now() - tCh}ms`);
+    } catch (e) {
+      Zotero.log(`[Zhutero/FW] Chapter ${i + 1} "${c.title}" failed: ${e.message}`, "warning");
+      // Insert a placeholder node so user still sees the chapter exists
+      chapterNodes.push({
+        id: `c${c.chapterNum}`,
+        label: c.title,
+        type: "chapter",
+        page: c.chapterNum,
+        summary: `(LLM failed: ${e.message})`,
+        quotes: [],
+        children: [],
+      });
+    }
+  }
+
+  const framework = {
+    title: "",
+    thesis: "",
+    children: chapterNodes,
+  };
+  Zotero.debug(`[Zhutero/FW] Merged framework nodes=${countNodes(framework)}`);
+  return { framework, usage: totalUsage };
+}
+
+/**
+ * Split text on "=== CHAPTER N: title ===" markers. Returns
+ * [{chapterNum, title, text}], where text includes the marker.
+ */
+function splitByChapter(fullText) {
+  const re = /^=== CHAPTER (\d+): (.+?) ===$/gm;
+  const matches = [...fullText.matchAll(re)];
+  if (!matches.length) return [];
+  const out = [];
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    const start = m.index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : fullText.length;
+    out.push({
+      chapterNum: parseInt(m[1], 10),
+      title: m[2],
+      text: fullText.slice(start, end).trim(),
+    });
+  }
+  return out;
 }
 
 function countNodes(fw) {
