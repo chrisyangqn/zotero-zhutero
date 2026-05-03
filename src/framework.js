@@ -202,31 +202,134 @@ async function generateFramework(fullText, chatCompletion, onProgress) {
     );
   }
 
-  const chapterNodes = [];
   const totalUsage = { input_tokens: 0, output_tokens: 0 };
+  const chapterNodes = await processChapters(
+    chunks, chatCompletion, onProgress, totalUsage,
+    /* allChunks */ chunks
+  );
+
+  const framework = {
+    title: "",
+    thesis: "",
+    children: chapterNodes,
+  };
+  Zotero.debug(`[Zhutero/FW] Merged framework nodes=${countNodes(framework)}`);
+  return { framework, usage: totalUsage };
+}
+
+/**
+ * Re-run only the failed chapters of an existing chunked framework.
+ * Returns a new framework with succeeded chapters preserved verbatim and
+ * failed ones replaced by a fresh LLM call (or kept if it fails again).
+ */
+async function regenerateFailedChapters(existingFramework, fullText, chatCompletion, onProgress) {
+  if (!existingFramework?.children?.length) {
+    throw new Error("No existing framework to retry");
+  }
+  const allChunks = splitByChapter(fullText);
+  if (!allChunks.length) {
+    throw new Error("Cannot retry: source has no chapter markers");
+  }
+
+  const failedNums = new Set(
+    existingFramework.children.filter(isFailedNode).map(n => n.page)
+  );
+  if (!failedNums.size) {
+    Zotero.debug("[Zhutero/FW] regenerateFailed: no failed chapters");
+    return { framework: existingFramework, usage: { input_tokens: 0, output_tokens: 0 } };
+  }
+  Zotero.debug(`[Zhutero/FW] regenerateFailed: ${failedNums.size} chapters to retry`);
+
+  const failedChunks = allChunks.filter(c => failedNums.has(c.chapterNum));
+  const totalUsage = { input_tokens: 0, output_tokens: 0 };
+  const newNodes = await processChapters(
+    failedChunks, chatCompletion, onProgress, totalUsage, allChunks
+  );
+
+  // Merge: replace failed nodes with new ones (matched by chapter number)
+  const newByPage = new Map(newNodes.map(n => [n.page, n]));
+  const mergedChildren = existingFramework.children.map(n => {
+    const replacement = newByPage.get(n.page);
+    return replacement || n;
+  });
+
+  return {
+    framework: { ...existingFramework, children: mergedChildren },
+    usage: totalUsage,
+  };
+}
+
+/**
+ * Detect a failed-LLM placeholder node (created when chapter call errored).
+ */
+function isFailedNode(node) {
+  return typeof node?.summary === "string" && node.summary.startsWith("(LLM failed");
+}
+
+function countFailedChapters(framework) {
+  if (!framework?.children) return 0;
+  return framework.children.filter(isFailedNode).length;
+}
+
+/**
+ * Process a list of chapter chunks: pacing, LLM call per chunk, placeholder
+ * for failures. Returns array of resulting nodes (one per input chunk, in
+ * source order).
+ *
+ * `onProgress` receives a string like "Chapter 3/13...".
+ * `progressContext` (the 5th arg) is the FULL chapter list so progress
+ * counts can be relative to total chapters even when only retrying some.
+ */
+async function processChapters(chunks, chatCompletion, onProgress, totalUsage, allChunks) {
+  // Pacing: keep request volume under the org's per-minute token budget.
+  // Default Anthropic tier is 30K input tokens / minute.
+  const TOKENS_PER_MINUTE_BUDGET = 25000;
+  let tokensInWindow = 0;
+  let windowStart = Date.now();
+
+  async function paceBeforeCall(estTokens) {
+    const now = Date.now();
+    if (now - windowStart > 60000) {
+      tokensInWindow = 0;
+      windowStart = now;
+    }
+    if (tokensInWindow + estTokens > TOKENS_PER_MINUTE_BUDGET) {
+      const waitMs = 60000 - (now - windowStart) + 1000;
+      if (waitMs > 0) {
+        Zotero.debug(`[Zhutero/FW] Pacing: would exceed ${TOKENS_PER_MINUTE_BUDGET} tok/min, sleeping ${(waitMs / 1000).toFixed(1)}s`);
+        await new Promise(r => setTimeout(r, waitMs));
+        tokensInWindow = 0;
+        windowStart = Date.now();
+      }
+    }
+    tokensInWindow += estTokens;
+  }
+
+  const total = allChunks.length;
+  const indexInAll = new Map(allChunks.map((c, i) => [c.chapterNum, i + 1]));
+
+  const out = [];
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i];
-    if (onProgress) onProgress(`Chapter ${i + 1}/${chunks.length}...`);
-    Zotero.debug(`[Zhutero/FW] Chapter ${i + 1}/${chunks.length} "${c.title}" ${c.text.length}c`);
+    const display = indexInAll.get(c.chapterNum) ?? (i + 1);
+    if (onProgress) onProgress(`Chapter ${display}/${total}...`);
+    Zotero.debug(`[Zhutero/FW] Chapter ${display}/${total} "${c.title}" ${c.text.length}c`);
+
+    await paceBeforeCall(c.text.length);
+
     const tCh = Date.now();
     try {
-      const { text, usage } = await chatCompletion(
-        CHAPTER_PROMPT,
-        c.text,
-        { maxTokens: 4000 }
-      );
-      const node = parseLLMJson(text);
-      // Force chapter numbering to match source order
-      node.id = node.id || `c${c.chapterNum}`;
+      const node = await callChapterWithRetry(c, chatCompletion, totalUsage);
+      // Skeleton enforcement: TOC-derived title/page/id are authoritative
+      node.label = c.title || node.label;
       node.page = c.chapterNum;
-      chapterNodes.push(node);
-      totalUsage.input_tokens += usage?.input_tokens || 0;
-      totalUsage.output_tokens += usage?.output_tokens || 0;
-      Zotero.debug(`[Zhutero/FW] Chapter ${i + 1} done in ${Date.now() - tCh}ms`);
+      node.id = `c${c.chapterNum}`;
+      node.type = node.type || "chapter";
+      out.push(node);
+      Zotero.debug(`[Zhutero/FW] Chapter ${display} done in ${Date.now() - tCh}ms`);
     } catch (e) {
-      Zotero.log(`[Zhutero/FW] Chapter ${i + 1} "${c.title}" failed: ${e.message}`, "warning");
-      // Insert a placeholder node so user still sees the chapter exists
-      chapterNodes.push({
+      Zotero.log(`[Zhutero/FW] Chapter ${display} "${c.title}" failed: ${e.message}`, "warning");
+      out.push({
         id: `c${c.chapterNum}`,
         label: c.title,
         type: "chapter",
@@ -237,14 +340,86 @@ async function generateFramework(fullText, chatCompletion, onProgress) {
       });
     }
   }
+  return out;
+}
 
-  const framework = {
-    title: "",
-    thesis: "",
-    children: chapterNodes,
-  };
-  Zotero.debug(`[Zhutero/FW] Merged framework nodes=${countNodes(framework)}`);
-  return { framework, usage: totalUsage };
+/**
+ * Snapshot user-added data (userNote, userHighlights) from a framework
+ * tree. Returns Map keyed by lowercased label so we can reapply after
+ * regenerating, even if node IDs change.
+ */
+function snapshotUserData(framework) {
+  const map = new Map();
+  function walk(node) {
+    const key = (node.label || "").trim().toLowerCase();
+    if (key && (node.userNote || node.userHighlights?.length)) {
+      map.set(key, {
+        userNote: node.userNote || null,
+        userHighlights: node.userHighlights ? [...node.userHighlights] : [],
+      });
+    }
+    if (node.children) for (const c of node.children) walk(c);
+  }
+  if (framework?.children) for (const c of framework.children) walk(c);
+  return map;
+}
+
+function applyUserData(framework, snapshot) {
+  if (!snapshot || !snapshot.size) return framework;
+  let applied = 0;
+  function walk(node) {
+    const key = (node.label || "").trim().toLowerCase();
+    const data = snapshot.get(key);
+    if (data) {
+      if (data.userNote) node.userNote = data.userNote;
+      if (data.userHighlights?.length) node.userHighlights = data.userHighlights;
+      applied++;
+    }
+    if (node.children) for (const c of node.children) walk(c);
+  }
+  if (framework?.children) for (const c of framework.children) walk(c);
+  Zotero.debug(`[Zhutero/FW] Reapplied user data to ${applied} nodes (snapshot had ${snapshot.size})`);
+  return framework;
+}
+
+/**
+ * Call the LLM for a single chapter, retrying once if the response is not
+ * valid JSON. On retry we feed the parse error back so the model can fix it.
+ */
+async function callChapterWithRetry(chunk, chatCompletion, totalUsage) {
+  let lastErr = null;
+  let lastResponse = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let userMsg = chunk.text;
+    if (attempt === 1 && lastErr && lastResponse) {
+      userMsg =
+        `Your previous response could not be parsed as JSON. Error: ${lastErr.message}\n\n` +
+        `Your previous response started with:\n${lastResponse.slice(0, 300)}\n\n` +
+        `Please reply with ONLY valid JSON for this chapter. No markdown fences, no commentary.\n\n` +
+        chunk.text;
+      Zotero.debug(`[Zhutero/FW] Chapter "${chunk.title}" retry with parse-error feedback`);
+    }
+
+    const { text, usage } = await chatCompletion(
+      CHAPTER_PROMPT,
+      userMsg,
+      { maxTokens: 4000 }
+    );
+    totalUsage.input_tokens += usage?.input_tokens || 0;
+    totalUsage.output_tokens += usage?.output_tokens || 0;
+    lastResponse = text;
+
+    try {
+      const node = parseLLMJson(text);
+      node.id = node.id || `c${chunk.chapterNum}`;
+      node.page = chunk.chapterNum;
+      return node;
+    } catch (e) {
+      lastErr = e;
+      Zotero.debug(`[Zhutero/FW] Chapter "${chunk.title}" parse failed (attempt ${attempt + 1}): ${e.message}`);
+    }
+  }
+  throw lastErr || new Error("Failed to parse chapter response");
 }
 
 /**
@@ -692,5 +867,11 @@ async function removeZhuteroAnnotations(item) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { generateFramework, getItemFullText, parseLLMJson, createAnnotationsForFramework, removeZhuteroAnnotations };
+  module.exports = {
+    generateFramework, regenerateFailedChapters,
+    isFailedNode, countFailedChapters,
+    snapshotUserData, applyUserData,
+    getItemFullText, parseLLMJson,
+    createAnnotationsForFramework, removeZhuteroAnnotations,
+  };
 }

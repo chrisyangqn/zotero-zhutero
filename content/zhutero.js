@@ -5,9 +5,11 @@
 
 /* globals Zotero, Components, Services, IOUtils, PathUtils, ChromeUtils */
 /* globals chatCompletion, generateFramework, getItemFullText, parseLLMJson */
+/* globals regenerateFailedChapters, countFailedChapters, snapshotUserData, applyUserData */
 /* globals createAnnotationsForFramework, removeZhuteroAnnotations */
-/* globals getFramework, saveFramework, getNotes, saveNote */
+/* globals getFramework, saveFramework, getNotes, saveNote, deleteFramework */
 /* globals loadUserAnnotations, groupAnnotationsByNode */
+/* globals findFrameworkNote, loadFrameworkFromNote, saveFrameworkToNote, attachHighlightToFramework, removeHighlightFromFramework, migrateFromLegacyStorage */
 
 class ZhuteroPlugin {
   constructor() {
@@ -40,7 +42,92 @@ class ZhuteroPlugin {
     });
 
     await this._registerPane();
+    this._registerAnnotationObserver();
     Zotero.log("[Zhutero] Plugin initialized v" + version);
+  }
+
+  _registerAnnotationObserver() {
+    const self = this;
+    const observer = {
+      notify: async (event, type, ids /* , extraData */) => {
+        if (type !== "item") return;
+        if (event !== "add" && event !== "modify" && event !== "trash" && event !== "delete") return;
+        for (const rawId of ids) {
+          const id = typeof rawId === "string" && rawId.includes("-") ? parseInt(rawId.split("-")[0], 10) : rawId;
+          try {
+            await self._handleAnnotationEvent(event, id);
+          } catch (e) {
+            Zotero.log(`[Zhutero/Obs] handler error: ${e.message}`, "warning");
+          }
+        }
+      },
+    };
+    this._observerID = Zotero.Notifier.registerObserver(observer, ["item"], "zhutero");
+    Zotero.debug(`[Zhutero/Obs] Registered annotation observer ${this._observerID}`);
+  }
+
+  async _handleAnnotationEvent(event, itemID) {
+    const item = Zotero.Items.get(itemID);
+    if (!item || !item.isAnnotation?.()) return;
+    // Skip our own annotations
+    if ((item.annotationComment || "").startsWith("[Zhutero]")) return;
+
+    // Resolve attachment + parent regular item
+    const attachment = Zotero.Items.get(item.parentItemID);
+    if (!attachment) return;
+    const parentItem = attachment.parentItemID ? Zotero.Items.get(attachment.parentItemID) : attachment;
+    if (!parentItem) return;
+
+    // Load existing framework from note (if any)
+    const framework = loadFrameworkFromNote(parentItem);
+    if (!framework) {
+      Zotero.debug(`[Zhutero/Obs] Skip — no framework for item ${parentItem.key}`);
+      return;
+    }
+
+    if (event === "trash" || event === "delete") {
+      const removed = removeHighlightFromFramework(framework, item.key);
+      if (removed) {
+        await saveFrameworkToNote(parentItem, framework);
+        Zotero.debug(`[Zhutero/Obs] Removed highlight ${item.key}`);
+        if (this._panelItem?.id === parentItem.id && this._panelBody) {
+          await this._renderPanel(this._panelBody, this._panelItem);
+        }
+      }
+      return;
+    }
+
+    // For add/modify: parse position, attach to framework
+    let pageIndex = 0, y = 0;
+    try {
+      const pos = JSON.parse(item.annotationPosition || "{}");
+      pageIndex = pos.pageIndex ?? 0;
+      if (pos.rects?.length) y = pos.rects[0][1] ?? 0;
+    } catch (e) { /* EPUB CFI: leave at 0 for now */ }
+
+    const highlight = {
+      key: item.key,
+      itemId: item.id,
+      color: item.annotationColor || "#ffd400",
+      text: item.annotationText || "",
+      comment: item.annotationComment || "",
+      type: item.annotationType || "highlight",
+      pageIndex,
+      y,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Modify: replace existing entry
+    if (event === "modify") removeHighlightFromFramework(framework, item.key);
+    attachHighlightToFramework(framework, highlight);
+
+    await saveFrameworkToNote(parentItem, framework);
+    Zotero.debug(`[Zhutero/Obs] ${event} highlight ${item.key} on item ${parentItem.key}`);
+
+    // Refresh panel if user is currently viewing this item
+    if (this._panelItem?.id === parentItem.id && this._panelBody) {
+      await this._renderPanel(this._panelBody, this._panelItem);
+    }
   }
 
   async _registerPane() {
@@ -72,23 +159,32 @@ class ZhuteroPlugin {
       this._panelItem = item;
 
       try {
-        const stored = await getFramework(item.key);
+        // Primary storage: Zhutero-managed note
+        let stored = loadFrameworkFromNote(item);
+
+        // Migrate from legacy zhutero-data.json if note doesn't exist yet
+        if (!stored) {
+          const legacyStorage = { getFramework, getNotes, deleteFramework };
+          const migrated = await migrateFromLegacyStorage(item, legacyStorage);
+          if (migrated) {
+            Zotero.debug(`[Zhutero] Migrated legacy framework for ${item.key}`);
+            stored = loadFrameworkFromNote(item);
+          }
+        }
+
         this._framework = stored;
-        this._notes = await getNotes(item.key);
+        this._notes = []; // legacy notes now live inline in framework
       } catch (e) {
         this._framework = null;
         this._notes = [];
-        Zotero.log("[Zhutero] Failed to load data: " + e.message, "warning");
+        Zotero.log("[Zhutero] Failed to load framework: " + e.message, "warning");
       }
 
-      try {
-        this._userAnnotations = await loadUserAnnotations(item);
-        this._annotationsByNode = groupAnnotationsByNode(this._framework, this._userAnnotations);
-      } catch (e) {
-        this._userAnnotations = [];
-        this._annotationsByNode = new Map();
-        Zotero.log("[Zhutero] Failed to load user annotations: " + e.message, "warning");
-      }
+      // User PDF/EPUB highlights are now stored INSIDE the framework JSON
+      // under each node's userHighlights[]. The legacy real-time loader
+      // is no longer the source of truth — counts come from the framework.
+      this._userAnnotations = this._collectFrameworkHighlights(this._framework);
+      this._annotationsByNode = this._buildHighlightMap(this._framework);
 
       this._injectCSS(body);
       body.innerHTML = "";
@@ -144,16 +240,33 @@ class ZhuteroPlugin {
     const bar = doc.createElement("div");
     bar.className = "zt-action-bar";
 
+    const failedCount = countFailedChapters(this._framework);
+    const hasFw = !!this._framework;
+
     const genBtn = doc.createElement("button");
     genBtn.className = "zt-btn zt-btn-primary";
-    genBtn.textContent = this._framework ? "Regenerate" : "Generate";
-    genBtn.addEventListener("click", () => this._handleGenerate(doc, item, genBtn));
+    if (!hasFw) {
+      genBtn.textContent = "Generate";
+      genBtn.addEventListener("click", () => this._handleGenerate(doc, item, genBtn, /* mode */ "full"));
+    } else if (failedCount > 0) {
+      genBtn.textContent = `Retry Failed (${failedCount})`;
+      genBtn.title = `Re-run LLM only for ${failedCount} failed chapter(s); preserve everything else`;
+      genBtn.addEventListener("click", () => this._handleGenerate(doc, item, genBtn, "failed"));
+    } else {
+      genBtn.textContent = "Regenerate";
+      genBtn.title = "Re-run LLM and rebuild the framework (your notes & highlights are preserved)";
+      genBtn.addEventListener("click", () => this._handleGenerate(doc, item, genBtn, "full"));
+    }
 
-    const exportBtn = doc.createElement("button");
-    exportBtn.className = "zt-btn";
-    exportBtn.textContent = "Export to Note";
-    if (!this._framework) exportBtn.disabled = true;
-    exportBtn.addEventListener("click", () => this._handleExportToNote(doc, item, exportBtn));
+    // Secondary: Force full regenerate (always available when framework exists)
+    let regenAllBtn = null;
+    if (hasFw && failedCount > 0) {
+      regenAllBtn = doc.createElement("button");
+      regenAllBtn.className = "zt-btn";
+      regenAllBtn.textContent = "Regenerate All";
+      regenAllBtn.title = "Re-run LLM for the entire framework (overwrites succeeded chapters too)";
+      regenAllBtn.addEventListener("click", () => this._handleGenerate(doc, item, regenAllBtn, "full"));
+    }
 
     const createAnnBtn = doc.createElement("button");
     createAnnBtn.className = "zt-btn";
@@ -171,7 +284,7 @@ class ZhuteroPlugin {
           (msg) => { createAnnBtn.textContent = msg; }
         );
         createAnnBtn.textContent = "Saving...";
-        await saveFramework(this._currentItemKey, this._framework);
+        await saveFrameworkToNote(item, this._framework);
         if (this._panelBody) await this._renderPanel(this._panelBody, item);
       } catch (e) {
         Zotero.log(`[Zhutero] Create annotations error: ${e.message}`, "error");
@@ -205,8 +318,8 @@ class ZhuteroPlugin {
     importJsonBtn.addEventListener("click", () => this._handleImportJson(doc, item, importJsonBtn));
 
     bar.appendChild(genBtn);
+    if (regenAllBtn) bar.appendChild(regenAllBtn);
     bar.appendChild(createAnnBtn);
-    bar.appendChild(exportBtn);
     bar.appendChild(cleanBtn);
     bar.appendChild(exportJsonBtn);
     bar.appendChild(importJsonBtn);
@@ -214,6 +327,7 @@ class ZhuteroPlugin {
   }
 
   // ── View Toggle ──
+  // Mind Map view is currently deactivated; only Tree is shown.
 
   _createViewToggle(doc) {
     const bar = doc.createElement("div");
@@ -221,7 +335,7 @@ class ZhuteroPlugin {
 
     const views = [
       { id: "tree", label: "Tree" },
-      { id: "mindmap", label: "Mind Map" },
+      // { id: "mindmap", label: "Mind Map" }, // deactivated
     ];
 
     views.forEach((v) => {
@@ -277,6 +391,33 @@ class ZhuteroPlugin {
 
   // ── Generate ──
 
+  // Flatten all userHighlights[] from the framework into a single array
+  // (mirrors the old _userAnnotations shape so existing UI keeps working).
+  _collectFrameworkHighlights(framework) {
+    const out = [];
+    if (!framework?.children) return out;
+    function walk(node) {
+      if (node.userHighlights?.length) {
+        for (const h of node.userHighlights) out.push(h);
+      }
+      if (node.children) for (const c of node.children) walk(c);
+    }
+    for (const c of framework.children) walk(c);
+    return out;
+  }
+
+  // Build node.id → highlights[] map directly from the framework JSON.
+  _buildHighlightMap(framework) {
+    const map = new Map();
+    if (!framework?.children) return map;
+    function walk(node) {
+      if (node.userHighlights?.length) map.set(node.id, node.userHighlights);
+      if (node.children) for (const c of node.children) walk(c);
+    }
+    for (const c of framework.children) walk(c);
+    return map;
+  }
+
   async _itemHasPdfAttachment(item) {
     if (item.isAttachment()) {
       return item.attachmentContentType === "application/pdf";
@@ -289,12 +430,12 @@ class ZhuteroPlugin {
     return false;
   }
 
-  async _handleGenerate(doc, item, btn) {
+  async _handleGenerate(doc, item, btn, mode = "full") {
     const originalText = btn.textContent;
     btn.textContent = "Generating...";
     btn.disabled = true;
     const tStart = Date.now();
-    Zotero.debug(`[Zhutero] === Generate START item=${item.key} title="${item.getDisplayTitle?.()?.slice(0, 60) || ""}" ===`);
+    Zotero.debug(`[Zhutero] === Generate START mode=${mode} item=${item.key} title="${item.getDisplayTitle?.()?.slice(0, 60) || ""}" ===`);
 
     try {
       btn.textContent = "Extracting text...";
@@ -305,12 +446,35 @@ class ZhuteroPlugin {
         throw new Error("No text content found. Please index the document first.");
       }
 
+      // Snapshot existing user data so we can re-apply after regen.
+      const userSnapshot = this._framework ? snapshotUserData(this._framework) : null;
+      if (userSnapshot?.size) {
+        Zotero.debug(`[Zhutero] Snapshotted user data from ${userSnapshot.size} nodes`);
+      }
+
       const t2 = Date.now();
-      const { framework } = await generateFramework(
-        fullText, chatCompletion,
-        (msg) => { btn.textContent = msg; }
-      );
-      Zotero.debug(`[Zhutero] Phase 2/4 framework generated in ${Date.now() - t2}ms`);
+      let framework;
+      let usage;
+      if (mode === "failed" && this._framework) {
+        // Retry only failed chapters; keep succeeded ones intact
+        const result = await regenerateFailedChapters(
+          this._framework, fullText, chatCompletion,
+          (msg) => { btn.textContent = msg; }
+        );
+        framework = result.framework;
+        usage = result.usage;
+      } else {
+        const result = await generateFramework(
+          fullText, chatCompletion,
+          (msg) => { btn.textContent = msg; }
+        );
+        framework = result.framework;
+        usage = result.usage;
+      }
+      Zotero.debug(`[Zhutero] Phase 2/4 framework generated in ${Date.now() - t2}ms (mode=${mode}, tokens in/out=${usage?.input_tokens}/${usage?.output_tokens})`);
+
+      // Re-apply user notes & highlights
+      if (userSnapshot?.size) applyUserData(framework, userSnapshot);
 
       this._framework = framework;
 
@@ -330,9 +494,9 @@ class ZhuteroPlugin {
       }
 
       const t4 = Date.now();
-      btn.textContent = "Saving...";
-      await saveFramework(this._currentItemKey, framework);
-      Zotero.debug(`[Zhutero] Phase 4/4 saved in ${Date.now() - t4}ms`);
+      btn.textContent = "Saving to note...";
+      await saveFrameworkToNote(item, framework);
+      Zotero.debug(`[Zhutero] Phase 4/4 saved to note in ${Date.now() - t4}ms`);
 
       Zotero.debug(`[Zhutero] === Generate DONE total ${Date.now() - tStart}ms ===`);
 
@@ -424,11 +588,10 @@ class ZhuteroPlugin {
     header.appendChild(badge);
     header.appendChild(noteBtn);
 
-    const existingNote = this._notes.find((n) => n.node_id === node.id);
-    if (existingNote) {
+    if (node.userNote) {
       const ind = doc.createElement("span");
       ind.className = "zt-note-indicator";
-      ind.title = existingNote.content.slice(0, 100);
+      ind.title = node.userNote.slice(0, 100);
       ind.textContent = "💬";
       header.appendChild(ind);
     }
@@ -484,14 +647,12 @@ class ZhuteroPlugin {
     const existing = parentEl.querySelector(".zt-note-editor");
     if (existing) { existing.remove(); return; }
 
-    const noteData = this._notes.find((n) => n.node_id === node.id);
-
     const editor = doc.createElement("div");
     editor.className = "zt-note-editor";
 
     const textarea = doc.createElement("textarea");
     textarea.className = "zt-note-textarea";
-    textarea.value = noteData?.content || "";
+    textarea.value = node.userNote || "";
     textarea.placeholder = "Write your notes here...";
     textarea.rows = 4;
 
@@ -502,9 +663,12 @@ class ZhuteroPlugin {
     saveBtn.className = "zt-btn zt-btn-sm zt-btn-primary";
     saveBtn.textContent = "Save";
     saveBtn.addEventListener("click", async () => {
-      await saveNote(this._currentItemKey, node.id, textarea.value);
-      this._notes = await getNotes(this._currentItemKey);
+      const text = textarea.value.trim();
+      if (text) node.userNote = text;
+      else delete node.userNote;
+      await saveFrameworkToNote(this._panelItem, this._framework);
       editor.remove();
+      if (this._panelBody) await this._renderPanel(this._panelBody, this._panelItem);
     });
 
     const cancelBtn = doc.createElement("button");
@@ -680,22 +844,20 @@ class ZhuteroPlugin {
     btn.disabled = true;
 
     try {
-      const win = Zotero.getMainWindow();
-      const fp = Components.classes["@mozilla.org/filepicker;1"]
-        .createInstance(Components.interfaces.nsIFilePicker);
-      fp.init(win, "Export Zhutero Framework", Components.interfaces.nsIFilePicker.modeSave);
-      fp.appendFilter("JSON files", "*.json");
+      Zotero.debug("[Zhutero/Export] Opening file picker...");
       const titleSafe = (this._framework.title || item.getDisplayTitle?.() || "framework")
         .replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").slice(0, 60);
-      fp.defaultString = `zhutero_${titleSafe}.json`;
-
-      const rv = await new Promise((resolve) => fp.open(resolve));
-      const FP = Components.interfaces.nsIFilePicker;
-      if (rv !== FP.returnOK && rv !== FP.returnReplace) {
+      const filePath = await this._showFilePicker({
+        title: "Export Zhutero Framework",
+        mode: "save",
+        defaultName: `zhutero_${titleSafe}.json`,
+      });
+      if (!filePath) {
         btn.disabled = false;
         return;
       }
 
+      Zotero.debug(`[Zhutero/Export] Writing to ${filePath}`);
       const payload = {
         zhuteroVersion: this.version,
         exportedAt: new Date().toISOString(),
@@ -704,15 +866,61 @@ class ZhuteroPlugin {
         framework: this._framework,
         notes: this._notes || [],
       };
-      await IOUtils.writeUTF8(fp.file.path, JSON.stringify(payload, null, 2));
+      await IOUtils.writeUTF8(filePath, JSON.stringify(payload, null, 2));
 
       btn.textContent = "Exported!";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
     } catch (e) {
-      Zotero.log(`[Zhutero] Export JSON error: ${e.message}`, "error");
+      Zotero.log(`[Zhutero] Export JSON error: ${e.message}\n${e.stack || ""}`, "error");
       btn.textContent = "Export failed";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
     }
+  }
+
+  /**
+   * Cross-version file picker. Returns the selected file path string, or
+   * null if the user cancelled. Tries multiple init signatures to handle
+   * Zotero on Firefox 115+ (BrowsingContext) and earlier.
+   */
+  async _showFilePicker({ title, mode, defaultName }) {
+    const win = Zotero.getMainWindow();
+    const FP = Components.interfaces.nsIFilePicker;
+    const fp = Components.classes["@mozilla.org/filepicker;1"].createInstance(FP);
+    const modeConst = mode === "save" ? FP.modeSave : FP.modeOpen;
+
+    // Modern (Firefox 115+) requires BrowsingContext; older accepts Window.
+    let initOk = false;
+    const initTargets = [win.browsingContext, win].filter(Boolean);
+    let lastErr = null;
+    for (const target of initTargets) {
+      try {
+        fp.init(target, title, modeConst);
+        initOk = true;
+        break;
+      } catch (e) {
+        lastErr = e;
+        Zotero.debug(`[Zhutero/Export] fp.init failed with target type ${typeof target}: ${e.message}`);
+      }
+    }
+    if (!initOk) throw new Error(`File picker init failed: ${lastErr?.message || "unknown"}`);
+
+    fp.appendFilter("JSON files", "*.json");
+    if (defaultName) fp.defaultString = defaultName;
+
+    // open() may take a callback (older) or return a Promise (newer).
+    const rv = await new Promise((resolve, reject) => {
+      try {
+        const maybePromise = fp.open(resolve);
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.then(resolve, reject);
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+    if (rv !== FP.returnOK && rv !== FP.returnReplace) return null;
+    return fp.file?.path || null;
   }
 
   async _handleImportJson(doc, item, btn) {
@@ -720,20 +928,17 @@ class ZhuteroPlugin {
     btn.disabled = true;
 
     try {
-      const win = Zotero.getMainWindow();
-      const fp = Components.classes["@mozilla.org/filepicker;1"]
-        .createInstance(Components.interfaces.nsIFilePicker);
-      fp.init(win, "Import Zhutero Framework", Components.interfaces.nsIFilePicker.modeOpen);
-      fp.appendFilter("JSON files", "*.json");
-
-      const rv = await new Promise((resolve) => fp.open(resolve));
-      const FP = Components.interfaces.nsIFilePicker;
-      if (rv !== FP.returnOK) {
+      Zotero.debug("[Zhutero/Import] Opening file picker...");
+      const filePath = await this._showFilePicker({
+        title: "Import Zhutero Framework",
+        mode: "open",
+      });
+      if (!filePath) {
         btn.disabled = false;
         return;
       }
 
-      const raw = await IOUtils.readUTF8(fp.file.path);
+      const raw = await IOUtils.readUTF8(filePath);
       const payload = JSON.parse(raw);
       const framework = payload.framework || payload;
       if (!framework || typeof framework !== "object" || !framework.children) {
@@ -742,6 +947,7 @@ class ZhuteroPlugin {
 
       // Confirm if existing framework will be overwritten
       if (this._framework) {
+        const win = Zotero.getMainWindow();
         const ok = Services.prompt.confirm(
           win, "Replace existing framework?",
           "This item already has a framework. Importing will replace it and rebuild PDF annotations. Continue?"
@@ -751,12 +957,15 @@ class ZhuteroPlugin {
 
       this._framework = framework;
 
-      btn.textContent = "Saving...";
-      await saveFramework(this._currentItemKey, framework);
+      btn.textContent = "Saving to note...";
+      await saveFrameworkToNote(item, framework);
 
-      btn.textContent = "Annotating...";
-      await removeZhuteroAnnotations(item);
-      await createAnnotationsForFramework(framework, item);
+      const hasPdf = await this._itemHasPdfAttachment(item);
+      if (hasPdf) {
+        btn.textContent = "Annotating...";
+        await removeZhuteroAnnotations(item);
+        await createAnnotationsForFramework(framework, item);
+      }
 
       if (this._panelBody) {
         await this._renderPanel(this._panelBody, item);
@@ -765,119 +974,14 @@ class ZhuteroPlugin {
       btn.textContent = "Imported!";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
     } catch (e) {
-      Zotero.log(`[Zhutero] Import JSON error: ${e.message}`, "error");
+      Zotero.log(`[Zhutero] Import JSON error: ${e.message}\n${e.stack || ""}`, "error");
       btn.textContent = "Import failed";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
     }
   }
 
-  // ── Export to Zotero Note (Better Notes compatible) ──
-
-  async _handleExportToNote(doc, item, btn) {
-    if (!this._framework) return;
-
-    const originalText = btn.textContent;
-    btn.textContent = "Exporting...";
-    btn.disabled = true;
-
-    try {
-      let parentItem = item;
-      if (item.isAttachment() && item.parentItemID) {
-        parentItem = Zotero.Items.get(item.parentItemID);
-      }
-
-      let pdfAttachment = null;
-      if (item.isAttachment() && item.attachmentContentType === "application/pdf") {
-        pdfAttachment = item;
-      } else {
-        const attachmentIDs = parentItem.getAttachments();
-        for (const aid of attachmentIDs) {
-          const att = Zotero.Items.get(aid);
-          if (att.attachmentContentType === "application/pdf") {
-            pdfAttachment = att; break;
-          }
-        }
-      }
-
-      const html = this._frameworkToHTML(this._framework, pdfAttachment, parentItem);
-      const noteItem = new Zotero.Item("note");
-      noteItem.parentID = parentItem.id;
-      noteItem.libraryID = parentItem.libraryID;
-      noteItem.setNote(html);
-      await noteItem.saveTx();
-
-      btn.textContent = "Exported!";
-      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
-    } catch (e) {
-      Zotero.log(`[Zhutero] Export error: ${e.message}`, "error");
-      btn.textContent = "Export failed";
-      setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
-    }
-  }
-
-  _frameworkToHTML(fw, pdfAttachment, parentItem) {
-    const pdfKey = pdfAttachment?.key;
-    let html = `<div data-schema-version="9">`;
-    html += `<h1>${this._esc(fw.title || "Reading Framework")}</h1>\n`;
-    if (fw.thesis) html += `<blockquote><p>${this._esc(fw.thesis)}</p></blockquote>\n`;
-    html += `<p><em>Generated by Zhutero on ${new Date().toLocaleDateString()}</em></p>\n<hr/>\n`;
-    if (fw.children) fw.children.forEach((c) => { html += this._nodeToHTML(c, 2, pdfKey); });
-    if (this._notes?.length) {
-      html += `<hr/>\n<h2>Notes</h2>\n`;
-      this._notes.forEach((n) => {
-        const l = this._findNodeLabel(fw, n.node_id);
-        html += `<h3>${this._esc(l || n.node_id)}</h3>\n<p>${this._esc(n.content)}</p>\n`;
-      });
-    }
-    html += `</div>`;
-    return html;
-  }
-
-  _nodeToHTML(node, hl, pdfKey) {
-    hl = Math.min(hl, 6);
-    let pageLink = "";
-    if (node.page && pdfKey) {
-      pageLink = ` <a href="zotero://open-pdf/library/items/${pdfKey}?page=${node.page}">(p.${node.page})</a>`;
-    } else if (node.page) {
-      pageLink = ` (p.${node.page})`;
-    }
-    let html = `<h${hl}>${this._esc(node.label || "")}${pageLink}</h${hl}>\n`;
-    if (node.summary) html += `<p>${this._esc(node.summary)}</p>\n`;
-    if (node.quotes?.length) {
-      node.quotes.forEach((q) => {
-        let ql = q.page && pdfKey ? ` <a href="zotero://open-pdf/library/items/${pdfKey}?page=${q.page}">(p.${q.page})</a>` : "";
-        html += `<blockquote><p>${this._esc(q.text)}${ql}</p></blockquote>\n`;
-      });
-    }
-    if (node.children?.length) {
-      if (hl >= 6) {
-        html += `<ul>\n`;
-        node.children.forEach((c) => { html += this._nodeToListHTML(c, pdfKey); });
-        html += `</ul>\n`;
-      } else {
-        node.children.forEach((c) => { html += this._nodeToHTML(c, hl + 1, pdfKey); });
-      }
-    }
-    return html;
-  }
-
-  _nodeToListHTML(node, pdfKey) {
-    let pl = node.page && pdfKey ? ` <a href="zotero://open-pdf/library/items/${pdfKey}?page=${node.page}">(p.${node.page})</a>` : "";
-    let html = `<li><strong>${this._esc(node.label || "")}</strong>${pl}`;
-    if (node.summary) html += ` — ${this._esc(node.summary)}`;
-    if (node.children?.length) {
-      html += `\n<ul>\n`;
-      node.children.forEach((c) => { html += this._nodeToListHTML(c, pdfKey); });
-      html += `</ul>\n`;
-    }
-    return html + `</li>\n`;
-  }
-
-  _findNodeLabel(fw, nodeId) {
-    function s(n) { if (n.id === nodeId) return n.label; if (n.children) for (const c of n.children) { const r = s(c); if (r) return r; } return null; }
-    if (fw.children) for (const c of fw.children) { const r = s(c); if (r) return r; }
-    return null;
-  }
+  // (Export to Note + HTML rendering helpers removed — the framework IS
+  //  a Zhutero-managed note now; rendering lives in src/noteStorage.js.)
 
   // ── Navigation ──
 
@@ -1055,6 +1159,10 @@ class ZhuteroPlugin {
 
   destroy() {
     try { Zotero.ItemPaneManager.unregisterSection(this._tabId); } catch (e) {}
+    if (this._observerID) {
+      try { Zotero.Notifier.unregisterObserver(this._observerID); } catch (e) {}
+      this._observerID = null;
+    }
     Zotero.log("[Zhutero] Plugin destroyed");
   }
 }

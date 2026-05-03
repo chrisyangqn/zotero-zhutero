@@ -90,31 +90,46 @@ async function chatCompletion(systemPrompt, userMessage, opts = {}) {
 }
 
 async function anthropicChat(baseUrl, apiKey, model, system, user, maxTokens) {
-  const resp = await fetch(`${baseUrl}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: "user", content: user }],
-    }),
-  });
+  const MAX_RETRIES = 4;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const resp = await fetch(`${baseUrl}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
 
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Anthropic API error: ${resp.status}`);
+    // Retry on 429 (rate limit) and 529 (overloaded) with backoff
+    if ((resp.status === 429 || resp.status === 529) && attempt < MAX_RETRIES) {
+      const retryAfterHdr = resp.headers.get("retry-after");
+      const retrySec = retryAfterHdr ? parseInt(retryAfterHdr, 10) : 0;
+      // Default backoff: 15s, 30s, 60s, 90s; respect retry-after if larger
+      const backoff = Math.max(retrySec, [15, 30, 60, 90][attempt] || 90);
+      Zotero.debug(`[Zhutero/LLM] ${resp.status} rate limit (attempt ${attempt + 1}), waiting ${backoff}s`);
+      await new Promise(r => setTimeout(r, backoff * 1000));
+      continue;
+    }
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Anthropic API error: ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    return {
+      text: data.content[0].text,
+      usage: data.usage || {},
+    };
   }
-
-  const data = await resp.json();
-  return {
-    text: data.content[0].text,
-    usage: data.usage || {},
-  };
+  throw new Error("Anthropic rate limit retries exhausted");
 }
 
 async function openaiChat(baseUrl, apiKey, model, system, user, maxTokens) {
