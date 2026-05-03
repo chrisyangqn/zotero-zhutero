@@ -49,15 +49,16 @@ class ZhuteroPlugin {
   _registerAnnotationObserver() {
     const self = this;
     const observer = {
-      notify: async (event, type, ids /* , extraData */) => {
+      notify: async (event, type, ids, extraData) => {
         if (type !== "item") return;
         if (event !== "add" && event !== "modify" && event !== "trash" && event !== "delete") return;
         for (const rawId of ids) {
           const id = typeof rawId === "string" && rawId.includes("-") ? parseInt(rawId.split("-")[0], 10) : rawId;
+          const extra = extraData?.[rawId] || extraData?.[id];
           try {
-            await self._handleAnnotationEvent(event, id);
+            await self._handleAnnotationEvent(event, id, extra);
           } catch (e) {
-            Zotero.log(`[Zhutero/Obs] handler error: ${e.message}`, "warning");
+            Zotero.log(`[Zhutero/Obs] handler error: ${e.message}\n${e.stack || ""}`, "warning");
           }
         }
       },
@@ -66,9 +67,51 @@ class ZhuteroPlugin {
     Zotero.debug(`[Zhutero/Obs] Registered annotation observer ${this._observerID}`);
   }
 
-  async _handleAnnotationEvent(event, itemID) {
-    const item = Zotero.Items.get(itemID);
-    if (!item || !item.isAnnotation?.()) return;
+  // Walk up to the parent regular item (works for attachments, notes, or
+  // regular items themselves). Used to compare against the item shown in
+  // the zhutero panel — which can be the attachment OR the regular item
+  // depending on Zotero's pane state.
+  _getRegularParent(item) {
+    if (!item) return null;
+    if (item.isAttachment?.() || item.isNote?.()) {
+      return item.parentItemID ? Zotero.Items.get(item.parentItemID) : null;
+    }
+    return item;
+  }
+
+  async _refreshPanelIfShowing(parentItem) {
+    if (!this._panelBody || !this._panelItem) return;
+    const panelParent = this._getRegularParent(this._panelItem);
+    if (panelParent?.id === parentItem.id) {
+      await this._renderPanel(this._panelBody, this._panelItem);
+    }
+  }
+
+  async _handleAnnotationEvent(event, itemID, extra) {
+    Zotero.debug(`[Zhutero/Obs] event=${event} id=${itemID} extra=${extra ? JSON.stringify(extra) : "n/a"}`);
+    let item = Zotero.Items.get(itemID);
+
+    // Hard-delete path: item is gone, but we may still know its key from
+    // extraData. Strip it from the currently-viewed framework if present.
+    if (!item) {
+      if (event !== "delete") return;
+      const key = extra?.key;
+      if (!key) return;
+      if (this._framework && this._panelItem) {
+        const removed = removeHighlightFromFramework(this._framework, key);
+        if (removed) {
+          const parent = this._getRegularParent(this._panelItem);
+          if (parent) {
+            await saveFrameworkToNote(parent, this._framework);
+            Zotero.debug(`[Zhutero/Obs] Hard-deleted ${key} from current framework`);
+            if (this._panelBody) await this._renderPanel(this._panelBody, this._panelItem);
+          }
+        }
+      }
+      return;
+    }
+
+    if (!item.isAnnotation?.()) return;
     // Skip our own annotations
     if ((item.annotationComment || "").startsWith("[Zhutero]")) return;
 
@@ -89,10 +132,10 @@ class ZhuteroPlugin {
       const removed = removeHighlightFromFramework(framework, item.key);
       if (removed) {
         await saveFrameworkToNote(parentItem, framework);
-        Zotero.debug(`[Zhutero/Obs] Removed highlight ${item.key}`);
-        if (this._panelItem?.id === parentItem.id && this._panelBody) {
-          await this._renderPanel(this._panelBody, this._panelItem);
-        }
+        Zotero.debug(`[Zhutero/Obs] Removed highlight ${item.key} (event=${event})`);
+        await this._refreshPanelIfShowing(parentItem);
+      } else {
+        Zotero.debug(`[Zhutero/Obs] No highlight with key ${item.key} found in framework`);
       }
       return;
     }
@@ -138,11 +181,7 @@ class ZhuteroPlugin {
 
     await saveFrameworkToNote(parentItem, framework);
     Zotero.debug(`[Zhutero/Obs] ${event} highlight ${item.key} on item ${parentItem.key}`);
-
-    // Refresh panel if user is currently viewing this item
-    if (this._panelItem?.id === parentItem.id && this._panelBody) {
-      await this._renderPanel(this._panelBody, this._panelItem);
-    }
+    await this._refreshPanelIfShowing(parentItem);
   }
 
   async _registerPane() {
