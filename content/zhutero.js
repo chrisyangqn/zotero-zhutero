@@ -240,6 +240,10 @@ class ZhuteroPlugin {
       this._userAnnotations = this._collectFrameworkHighlights(this._framework);
       this._annotationsByNode = this._buildHighlightMap(this._framework);
 
+      // Track whether the source is an EPUB so the tree can use chapter
+      // labels instead of page numbers (EPUBs have no real pagination).
+      this._isEpub = this._itemHasEpubAttachment(item);
+
       this._injectCSS(body);
       body.innerHTML = "";
 
@@ -484,6 +488,18 @@ class ZhuteroPlugin {
     return false;
   }
 
+  _itemHasEpubAttachment(item) {
+    if (!item) return false;
+    if (item.isAttachment?.()) {
+      return item.attachmentContentType === "application/epub+zip";
+    }
+    for (const aid of item.getAttachments()) {
+      const att = Zotero.Items.get(aid);
+      if (att?.attachmentContentType === "application/epub+zip") return true;
+    }
+    return false;
+  }
+
   async _handleGenerate(doc, item, btn, mode = "full") {
     const originalText = btn.textContent;
     btn.textContent = "Generating...";
@@ -644,8 +660,18 @@ class ZhuteroPlugin {
     const pageRef = doc.createElement("span");
     pageRef.className = "zt-tree-page";
     if (node.page) {
-      pageRef.textContent = `p.${node.page}`;
-      pageRef.addEventListener("click", () => this._navigateToNode(node));
+      // For EPUB the `page` field is the chapter index (no real pages),
+      // so show "ch.N" only on chapter rows and hide it on subsections
+      // (where it would just repeat the parent chapter's number).
+      if (this._isEpub) {
+        if (node.type === "chapter") {
+          pageRef.textContent = `ch.${node.page}`;
+          pageRef.addEventListener("click", () => this._navigateToNode(node));
+        }
+      } else {
+        pageRef.textContent = `p.${node.page}`;
+        pageRef.addEventListener("click", () => this._navigateToNode(node));
+      }
     }
 
     const badge = doc.createElement("span");
@@ -883,10 +909,10 @@ class ZhuteroPlugin {
     label.textContent = node.label || "";
     nodeEl.appendChild(label);
 
-    if (node.page) {
+    if (node.page && (!this._isEpub || node.type === "chapter")) {
       const page = doc.createElement("span");
       page.className = "zt-mm-page";
-      page.textContent = `p.${node.page}`;
+      page.textContent = this._isEpub ? `ch.${node.page}` : `p.${node.page}`;
       nodeEl.appendChild(page);
     }
 
