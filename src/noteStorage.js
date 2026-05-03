@@ -105,7 +105,12 @@ function renderFrameworkHTML(framework) {
     `📚 <strong>Zhutero Framework</strong> — managed automatically. Direct edits will be overwritten.` +
     `</p>`
   );
-  if (framework.title) parts.push(`<h1>${escHTML(framework.title)}</h1>`);
+  // Zotero derives note titles from the first text content. Prefix with
+  // "[Zhutero]" so the note is easy to recognize in the items list.
+  const titleText = framework.title
+    ? `[Zhutero] ${framework.title}`
+    : `[Zhutero] Reading Framework`;
+  parts.push(`<h1>${escHTML(titleText)}</h1>`);
   if (framework.thesis) parts.push(`<p><em>${escHTML(framework.thesis)}</em></p>`);
 
   function nodeHTML(node, depth) {
@@ -178,9 +183,9 @@ async function saveFrameworkToNote(item, framework) {
     note.parentID = parent.id;
     note.libraryID = parent.libraryID;
     note.setNote(fullHTML);
-    // Title the note for easy recognition in Zotero
-    const docTitle = framework.title || parent.getDisplayTitle?.() || "";
-    note.setField?.("title", `${NOTE_TITLE_PREFIX}${docTitle}`.slice(0, 250));
+    // Note: Zotero notes don't have a "title" field — the title is auto-
+    // derived from the first heading/line of HTML. We render the framework
+    // title as the leading <h1>, so the note will show as "[Zhutero] {title}"-ish.
     await note.saveTx();
     Zotero.debug(`[Zhutero/Note] Created new note ${note.key}`);
   }

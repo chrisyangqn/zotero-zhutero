@@ -452,6 +452,26 @@ class ZhuteroPlugin {
         Zotero.debug(`[Zhutero] Snapshotted user data from ${userSnapshot.size} nodes`);
       }
 
+      // Incremental save: persist the framework after every chapter so a
+      // crash near the end never wipes out hours of LLM work. Throttle to
+      // avoid hammering the DB when chapters complete back-to-back.
+      let lastSave = 0;
+      const SAVE_THROTTLE_MS = 4000;
+      const onPartial = async (partialFw) => {
+        const now = Date.now();
+        if (now - lastSave < SAVE_THROTTLE_MS) return;
+        lastSave = now;
+        const fwToSave = userSnapshot?.size
+          ? applyUserData(JSON.parse(JSON.stringify(partialFw)), userSnapshot)
+          : partialFw;
+        try {
+          await saveFrameworkToNote(item, fwToSave);
+          Zotero.debug(`[Zhutero] Incremental save: ${fwToSave.children?.length || 0} chapters`);
+        } catch (e) {
+          Zotero.log(`[Zhutero] Incremental save failed (will retry at end): ${e.message}`, "warning");
+        }
+      };
+
       const t2 = Date.now();
       let framework;
       let usage;
@@ -459,14 +479,16 @@ class ZhuteroPlugin {
         // Retry only failed chapters; keep succeeded ones intact
         const result = await regenerateFailedChapters(
           this._framework, fullText, chatCompletion,
-          (msg) => { btn.textContent = msg; }
+          (msg) => { btn.textContent = msg; },
+          onPartial
         );
         framework = result.framework;
         usage = result.usage;
       } else {
         const result = await generateFramework(
           fullText, chatCompletion,
-          (msg) => { btn.textContent = msg; }
+          (msg) => { btn.textContent = msg; },
+          onPartial
         );
         framework = result.framework;
         usage = result.usage;

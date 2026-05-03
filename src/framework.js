@@ -163,7 +163,7 @@ Rules:
 - Output MUST be valid JSON; escape inner quotes; no trailing commas
 - Be concise — summaries 1-2 sentences each`;
 
-async function generateFramework(fullText, chatCompletion, onProgress) {
+async function generateFramework(fullText, chatCompletion, onProgress, onPartial) {
   Zotero.debug(`[Zhutero/FW] generateFramework: input=${fullText.length}c (limit ${SINGLE_CALL_CHAR_LIMIT})`);
 
   // If input is small enough, single call.
@@ -203,16 +203,20 @@ async function generateFramework(fullText, chatCompletion, onProgress) {
   }
 
   const totalUsage = { input_tokens: 0, output_tokens: 0 };
-  const chapterNodes = await processChapters(
+  // Build framework incrementally so onPartial sees a snapshot after each chapter
+  const framework = { title: "", thesis: "", children: [] };
+  await processChapters(
     chunks, chatCompletion, onProgress, totalUsage,
-    /* allChunks */ chunks
+    /* allChunks */ chunks,
+    /* onChapterComplete */ async (node) => {
+      framework.children.push(node);
+      if (onPartial) {
+        try { await onPartial(framework); }
+        catch (e) { Zotero.log(`[Zhutero/FW] onPartial error (ignored): ${e.message}`, "warning"); }
+      }
+    }
   );
 
-  const framework = {
-    title: "",
-    thesis: "",
-    children: chapterNodes,
-  };
   Zotero.debug(`[Zhutero/FW] Merged framework nodes=${countNodes(framework)}`);
   return { framework, usage: totalUsage };
 }
@@ -222,7 +226,7 @@ async function generateFramework(fullText, chatCompletion, onProgress) {
  * Returns a new framework with succeeded chapters preserved verbatim and
  * failed ones replaced by a fresh LLM call (or kept if it fails again).
  */
-async function regenerateFailedChapters(existingFramework, fullText, chatCompletion, onProgress) {
+async function regenerateFailedChapters(existingFramework, fullText, chatCompletion, onProgress, onPartial) {
   if (!existingFramework?.children?.length) {
     throw new Error("No existing framework to retry");
   }
@@ -242,19 +246,28 @@ async function regenerateFailedChapters(existingFramework, fullText, chatComplet
 
   const failedChunks = allChunks.filter(c => failedNums.has(c.chapterNum));
   const totalUsage = { input_tokens: 0, output_tokens: 0 };
-  const newNodes = await processChapters(
-    failedChunks, chatCompletion, onProgress, totalUsage, allChunks
+  const newByPage = new Map();
+  // Live framework that gets re-snapshotted after each retried chapter
+  const liveChildren = [...existingFramework.children];
+
+  await processChapters(
+    failedChunks, chatCompletion, onProgress, totalUsage, allChunks,
+    async (node) => {
+      newByPage.set(node.page, node);
+      const idx = liveChildren.findIndex(n => n.page === node.page);
+      if (idx >= 0) liveChildren[idx] = node;
+      if (onPartial) {
+        try {
+          await onPartial({ ...existingFramework, children: [...liveChildren] });
+        } catch (e) {
+          Zotero.log(`[Zhutero/FW] onPartial error (ignored): ${e.message}`, "warning");
+        }
+      }
+    }
   );
 
-  // Merge: replace failed nodes with new ones (matched by chapter number)
-  const newByPage = new Map(newNodes.map(n => [n.page, n]));
-  const mergedChildren = existingFramework.children.map(n => {
-    const replacement = newByPage.get(n.page);
-    return replacement || n;
-  });
-
   return {
-    framework: { ...existingFramework, children: mergedChildren },
+    framework: { ...existingFramework, children: liveChildren },
     usage: totalUsage,
   };
 }
@@ -280,7 +293,7 @@ function countFailedChapters(framework) {
  * `progressContext` (the 5th arg) is the FULL chapter list so progress
  * counts can be relative to total chapters even when only retrying some.
  */
-async function processChapters(chunks, chatCompletion, onProgress, totalUsage, allChunks) {
+async function processChapters(chunks, chatCompletion, onProgress, totalUsage, allChunks, onChapterComplete) {
   // Pacing: keep request volume under the org's per-minute token budget.
   // Default Anthropic tier is 30K input tokens / minute.
   const TOKENS_PER_MINUTE_BUDGET = 25000;
@@ -327,9 +340,10 @@ async function processChapters(chunks, chatCompletion, onProgress, totalUsage, a
       node.type = node.type || "chapter";
       out.push(node);
       Zotero.debug(`[Zhutero/FW] Chapter ${display} done in ${Date.now() - tCh}ms`);
+      if (onChapterComplete) await onChapterComplete(node);
     } catch (e) {
       Zotero.log(`[Zhutero/FW] Chapter ${display} "${c.title}" failed: ${e.message}`, "warning");
-      out.push({
+      const placeholder = {
         id: `c${c.chapterNum}`,
         label: c.title,
         type: "chapter",
@@ -337,7 +351,9 @@ async function processChapters(chunks, chatCompletion, onProgress, totalUsage, a
         summary: `(LLM failed: ${e.message})`,
         quotes: [],
         children: [],
-      });
+      };
+      out.push(placeholder);
+      if (onChapterComplete) await onChapterComplete(placeholder);
     }
   }
   return out;
