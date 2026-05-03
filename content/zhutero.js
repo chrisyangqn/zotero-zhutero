@@ -1026,7 +1026,7 @@ class ZhuteroPlugin {
     const wrap = doc.createElement("div");
     wrap.className = "zt-user-ann";
     wrap.style.borderLeftColor = ann.color;
-    wrap.title = `Page ${ann.pageIndex + 1} — click to open`;
+    wrap.title = `Click to open · Right-click to delete`;
 
     if (ann.text) {
       const text = doc.createElement("div");
@@ -1042,7 +1042,57 @@ class ZhuteroPlugin {
     }
 
     wrap.addEventListener("click", () => this._navigateToAnnotation(ann));
+    wrap.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._deleteUserAnnotation(ann);
+    });
     return wrap;
+  }
+
+  async _deleteUserAnnotation(ann) {
+    try {
+      const win = Zotero.getMainWindow();
+      const preview = (ann.text || ann.comment || "(no text)").slice(0, 80);
+      const ok = Services.prompt.confirm(
+        win, "Delete highlight?",
+        `This will move the highlight to Zotero's trash:\n\n"${preview}"`
+      );
+      if (!ok) return;
+
+      // Try to find by stored itemId first; fall back to looking up by key
+      let item = ann.itemId ? Zotero.Items.get(ann.itemId) : null;
+      if (!item && ann.key && this._panelItem) {
+        // Find the matching annotation on the parent's PDF/EPUB attachment
+        const candidates = [];
+        if (this._panelItem.isAttachment()) candidates.push(this._panelItem);
+        else for (const aid of this._panelItem.getAttachments()) {
+          candidates.push(Zotero.Items.get(aid));
+        }
+        for (const att of candidates) {
+          if (!att) continue;
+          for (const a of att.getAnnotations()) {
+            if (a.key === ann.key) { item = a; break; }
+          }
+          if (item) break;
+        }
+      }
+
+      if (item) {
+        await Zotero.Items.trashTx([item.id]);
+        Zotero.debug(`[Zhutero] Trashed annotation ${ann.key}`);
+        // The trash observer will remove it from the framework + re-render.
+      } else {
+        // No backing Zotero annotation — just strip it from the framework
+        // (stale leftover from earlier versions).
+        if (this._framework && removeHighlightFromFramework(this._framework, ann.key)) {
+          await saveFrameworkToNote(this._panelItem, this._framework);
+          if (this._panelBody) await this._renderPanel(this._panelBody, this._panelItem);
+        }
+      }
+    } catch (e) {
+      Zotero.log(`[Zhutero] Delete annotation error: ${e.message}\n${e.stack || ""}`, "error");
+    }
   }
 
   async _navigateToAnnotation(ann) {
