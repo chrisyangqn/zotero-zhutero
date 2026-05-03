@@ -99,11 +99,16 @@ class ZhuteroPlugin {
 
     // For add/modify: parse position, attach to framework
     let pageIndex = 0, y = 0;
+    let cfi = null;
     try {
       const pos = JSON.parse(item.annotationPosition || "{}");
       pageIndex = pos.pageIndex ?? 0;
       if (pos.rects?.length) y = pos.rects[0][1] ?? 0;
-    } catch (e) { /* EPUB CFI: leave at 0 for now */ }
+      // EPUB annotations: position is { type: "FragmentSelector", value: "epubcfi(...)" }
+      if (typeof pos.value === "string" && pos.value.includes("epubcfi")) {
+        cfi = pos.value;
+      }
+    } catch (e) { /* leave defaults */ }
 
     const highlight = {
       key: item.key,
@@ -114,12 +119,22 @@ class ZhuteroPlugin {
       type: item.annotationType || "highlight",
       pageIndex,
       y,
+      cfi: cfi || undefined,
       createdAt: new Date().toISOString(),
     };
 
+    // For EPUBs, derive a hint (chapter + subsection) from the CFI so the
+    // highlight lands in the right node instead of always chapter[0].
+    let hint = null;
+    const isEpub = attachment.attachmentContentType === "application/epub+zip";
+    if (isEpub && cfi) {
+      hint = await this._cfiToFrameworkHint(attachment, cfi);
+      Zotero.debug(`[Zhutero/Obs] EPUB CFI ${cfi} → hint=${JSON.stringify(hint)}`);
+    }
+
     // Modify: replace existing entry
     if (event === "modify") removeHighlightFromFramework(framework, item.key);
-    attachHighlightToFramework(framework, highlight);
+    attachHighlightToFramework(framework, highlight, hint);
 
     await saveFrameworkToNote(parentItem, framework);
     Zotero.debug(`[Zhutero/Obs] ${event} highlight ${item.key} on item ${parentItem.key}`);
@@ -1142,36 +1157,92 @@ class ZhuteroPlugin {
    *       <section>...</section>  ← /4/2/6  (subsection 2)
    *       ...
    */
-  async _navigateEpubToChapter(reader, attachment, chapterNum, sub = {}) {
+  /**
+   * Build (and cache) the chapter→{href, spineIndex} map for an EPUB
+   * attachment. Iterates spine in order, skipping empty bodies — same
+   * counting as getEpubFullText. Index N (0-based) in the returned
+   * array is chapter N+1 (1-based) in the framework.
+   */
+  async _getEpubChapterCache(attachment) {
     this._epubSpineCache = this._epubSpineCache || new Map();
     let chapters = this._epubSpineCache.get(attachment.key);
+    if (chapters) return chapters;
 
-    if (!chapters) {
-      chapters = [];
+    chapters = [];
+    try {
+      const path = await attachment.getFilePathAsync();
+      if (!path) throw new Error("EPUB file not available");
+      const { EPUB } = ChromeUtils.importESModule("chrome://zotero/content/EPUB.mjs");
+      const epub = new EPUB(path);
       try {
-        const path = await attachment.getFilePathAsync();
-        if (!path) throw new Error("EPUB file not available");
-        const { EPUB } = ChromeUtils.importESModule("chrome://zotero/content/EPUB.mjs");
-        const epub = new EPUB(path);
-        try {
-          let spineIndex = -1;
-          for await (const { href, doc } of epub.getSectionDocuments()) {
-            spineIndex++;
-            if (!doc?.body) continue;
-            const text = (doc.body.innerText || doc.body.textContent || "").trim();
-            if (!text) continue;
-            chapters.push({ href, spineIndex });
-          }
-        } finally {
-          try { epub.close(); } catch (e) {}
+        let spineIndex = -1;
+        for await (const { href, doc } of epub.getSectionDocuments()) {
+          spineIndex++;
+          if (!doc?.body) continue;
+          const text = (doc.body.innerText || doc.body.textContent || "").trim();
+          if (!text) continue;
+          chapters.push({ href, spineIndex });
         }
-        this._epubSpineCache.set(attachment.key, chapters);
-        Zotero.debug(`[Zhutero/Nav] Built EPUB chapter map: ${chapters.length} chapters for ${attachment.key}`);
-      } catch (e) {
-        Zotero.log(`[Zhutero] Could not build EPUB chapter map: ${e.message}`, "warning");
-        return;
+      } finally {
+        try { epub.close(); } catch (e) {}
+      }
+      this._epubSpineCache.set(attachment.key, chapters);
+      Zotero.debug(`[Zhutero/Nav] Built EPUB chapter map: ${chapters.length} chapters for ${attachment.key}`);
+      return chapters;
+    } catch (e) {
+      Zotero.log(`[Zhutero] Could not build EPUB chapter map: ${e.message}`, "warning");
+      return null;
+    }
+  }
+
+  /**
+   * Map an EPUB CFI to a framework chapter (and possibly subsection).
+   * Parses /6/N to get spine index, then optionally /4/2/M to get
+   * subsection index. Returns { chapterPage, subIndex } or null.
+   *
+   * Examples:
+   *   epubcfi(/6/8!/4/2/4/2/1:0)          → spine 8 → ch X, sub 1 (M=4)
+   *   epubcfi(/6/12!/4/2[id]/6[id]/2/...) → spine 12 → ch Y, sub 2 (M=6)
+   *   epubcfi(/6/8!/4/2,/2/1:0,/2/5:10)   → spine 8 → ch X, no sub
+   */
+  async _cfiToFrameworkHint(attachment, cfi) {
+    if (!cfi) return null;
+    const spineMatch = cfi.match(/\/6\/(\d+)/);
+    if (!spineMatch) return null;
+    const cfiSpineRef = parseInt(spineMatch[1], 10);
+    if (!Number.isFinite(cfiSpineRef) || cfiSpineRef < 2 || cfiSpineRef % 2 !== 0) return null;
+    const targetSpineIndex = cfiSpineRef / 2 - 1;
+
+    const chapters = await this._getEpubChapterCache(attachment);
+    if (!chapters) return null;
+
+    let chapterPage = null;
+    for (let i = 0; i < chapters.length; i++) {
+      if (chapters[i].spineIndex === targetSpineIndex) {
+        chapterPage = i + 1; // 1-indexed page in framework
+        break;
       }
     }
+    if (chapterPage == null) return null;
+
+    // Try to extract subsection: /4/2[..]/M[..]/...  after `!`
+    // M = 2 → h1 (chapter title, no subsection); M = 4 → sub 1; M = 6 → sub 2; ...
+    const after = cfi.split("!")[1] || "";
+    const subMatch = after.match(/^\/4(?:\[[^\]]*\])?\/2(?:\[[^\]]*\])?\/(\d+)/);
+    let subIndex = null;
+    if (subMatch) {
+      const M = parseInt(subMatch[1], 10);
+      if (M >= 4 && M % 2 === 0) {
+        subIndex = M / 2 - 1; // M=4 → 1, M=6 → 2, ...
+      }
+    }
+
+    return { chapterPage, subIndex };
+  }
+
+  async _navigateEpubToChapter(reader, attachment, chapterNum, sub = {}) {
+    const chapters = await this._getEpubChapterCache(attachment);
+    if (!chapters) return;
 
     const target = chapters[chapterNum - 1];
     if (!target) {

@@ -226,23 +226,44 @@ async function migrateFromLegacyStorage(item, legacyStorage) {
 }
 
 /**
- * Add a user highlight to a framework, attaching it to the deepest node
- * whose page <= the highlight's page (document-order matching).
+ * Add a user highlight to a framework.
+ *
+ * If `hint` is provided (typical for EPUB), it's the result of mapping
+ * the highlight's CFI to a chapter (and possibly subsection) in the
+ * framework: { chapterPage, subIndex }. Use that directly.
+ *
+ * Otherwise (PDF), fall back to position-based matching: walk the tree
+ * in document order, attach to the deepest node whose page <= the
+ * highlight's page.
+ *
  * Mutates and returns the framework.
  */
-function attachHighlightToFramework(framework, highlight) {
+function attachHighlightToFramework(framework, highlight, hint) {
   if (!framework?.children?.length) return framework;
-  // Walk in document order, find best owner
+
   let owner = null;
-  function walk(node) {
-    if (node.page != null && node.page <= highlight.pageIndex + 1) owner = node;
-    if (node.children) for (const c of node.children) walk(c);
+
+  if (hint?.chapterPage != null) {
+    const chapter = framework.children.find(c => c.page === hint.chapterPage);
+    if (chapter) {
+      owner = chapter;
+      if (hint.subIndex && chapter.children?.[hint.subIndex - 1]) {
+        owner = chapter.children[hint.subIndex - 1];
+      }
+    }
   }
-  for (const c of framework.children) walk(c);
-  if (!owner) owner = framework.children[0];
+
+  // Fallback: position-based for PDFs (or EPUB highlights we couldn't map)
+  if (!owner) {
+    function walk(node) {
+      if (node.page != null && node.page <= highlight.pageIndex + 1) owner = node;
+      if (node.children) for (const c of node.children) walk(c);
+    }
+    for (const c of framework.children) walk(c);
+    if (!owner) owner = framework.children[0];
+  }
 
   if (!owner.userHighlights) owner.userHighlights = [];
-  // Avoid dupes by key
   if (highlight.key && owner.userHighlights.some(h => h.key === highlight.key)) {
     return framework;
   }
