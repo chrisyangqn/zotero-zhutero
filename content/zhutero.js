@@ -680,20 +680,22 @@ class ZhuteroPlugin {
     btn.disabled = true;
 
     try {
-      Zotero.debug("[Zhutero/Export] Opening file picker...");
+      const win = Zotero.getMainWindow();
+      const fp = Components.classes["@mozilla.org/filepicker;1"]
+        .createInstance(Components.interfaces.nsIFilePicker);
+      fp.init(win, "Export Zhutero Framework", Components.interfaces.nsIFilePicker.modeSave);
+      fp.appendFilter("JSON files", "*.json");
       const titleSafe = (this._framework.title || item.getDisplayTitle?.() || "framework")
         .replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").slice(0, 60);
-      const filePath = await this._showFilePicker({
-        title: "Export Zhutero Framework",
-        mode: "save",
-        defaultName: `zhutero_${titleSafe}.json`,
-      });
-      if (!filePath) {
+      fp.defaultString = `zhutero_${titleSafe}.json`;
+
+      const rv = await new Promise((resolve) => fp.open(resolve));
+      const FP = Components.interfaces.nsIFilePicker;
+      if (rv !== FP.returnOK && rv !== FP.returnReplace) {
         btn.disabled = false;
         return;
       }
 
-      Zotero.debug(`[Zhutero/Export] Writing to ${filePath}`);
       const payload = {
         zhuteroVersion: this.version,
         exportedAt: new Date().toISOString(),
@@ -702,61 +704,15 @@ class ZhuteroPlugin {
         framework: this._framework,
         notes: this._notes || [],
       };
-      await IOUtils.writeUTF8(filePath, JSON.stringify(payload, null, 2));
+      await IOUtils.writeUTF8(fp.file.path, JSON.stringify(payload, null, 2));
 
       btn.textContent = "Exported!";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
     } catch (e) {
-      Zotero.log(`[Zhutero] Export JSON error: ${e.message}\n${e.stack || ""}`, "error");
+      Zotero.log(`[Zhutero] Export JSON error: ${e.message}`, "error");
       btn.textContent = "Export failed";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
     }
-  }
-
-  /**
-   * Cross-version file picker. Returns the selected file path string, or
-   * null if the user cancelled. Tries multiple init signatures to handle
-   * Zotero on Firefox 115+ (BrowsingContext) and earlier.
-   */
-  async _showFilePicker({ title, mode, defaultName }) {
-    const win = Zotero.getMainWindow();
-    const FP = Components.interfaces.nsIFilePicker;
-    const fp = Components.classes["@mozilla.org/filepicker;1"].createInstance(FP);
-    const modeConst = mode === "save" ? FP.modeSave : FP.modeOpen;
-
-    // Modern (Firefox 115+) requires BrowsingContext; older accepts Window.
-    let initOk = false;
-    const initTargets = [win.browsingContext, win].filter(Boolean);
-    let lastErr = null;
-    for (const target of initTargets) {
-      try {
-        fp.init(target, title, modeConst);
-        initOk = true;
-        break;
-      } catch (e) {
-        lastErr = e;
-        Zotero.debug(`[Zhutero/Export] fp.init failed with target type ${typeof target}: ${e.message}`);
-      }
-    }
-    if (!initOk) throw new Error(`File picker init failed: ${lastErr?.message || "unknown"}`);
-
-    fp.appendFilter("JSON files", "*.json");
-    if (defaultName) fp.defaultString = defaultName;
-
-    // open() may take a callback (older) or return a Promise (newer).
-    const rv = await new Promise((resolve, reject) => {
-      try {
-        const maybePromise = fp.open(resolve);
-        if (maybePromise && typeof maybePromise.then === "function") {
-          maybePromise.then(resolve, reject);
-        }
-      } catch (e) {
-        reject(e);
-      }
-    });
-
-    if (rv !== FP.returnOK && rv !== FP.returnReplace) return null;
-    return fp.file?.path || null;
   }
 
   async _handleImportJson(doc, item, btn) {
@@ -764,17 +720,20 @@ class ZhuteroPlugin {
     btn.disabled = true;
 
     try {
-      Zotero.debug("[Zhutero/Import] Opening file picker...");
-      const filePath = await this._showFilePicker({
-        title: "Import Zhutero Framework",
-        mode: "open",
-      });
-      if (!filePath) {
+      const win = Zotero.getMainWindow();
+      const fp = Components.classes["@mozilla.org/filepicker;1"]
+        .createInstance(Components.interfaces.nsIFilePicker);
+      fp.init(win, "Import Zhutero Framework", Components.interfaces.nsIFilePicker.modeOpen);
+      fp.appendFilter("JSON files", "*.json");
+
+      const rv = await new Promise((resolve) => fp.open(resolve));
+      const FP = Components.interfaces.nsIFilePicker;
+      if (rv !== FP.returnOK) {
         btn.disabled = false;
         return;
       }
 
-      const raw = await IOUtils.readUTF8(filePath);
+      const raw = await IOUtils.readUTF8(fp.file.path);
       const payload = JSON.parse(raw);
       const framework = payload.framework || payload;
       if (!framework || typeof framework !== "object" || !framework.children) {
@@ -783,7 +742,6 @@ class ZhuteroPlugin {
 
       // Confirm if existing framework will be overwritten
       if (this._framework) {
-        const win = Zotero.getMainWindow();
         const ok = Services.prompt.confirm(
           win, "Replace existing framework?",
           "This item already has a framework. Importing will replace it and rebuild PDF annotations. Continue?"
@@ -796,12 +754,9 @@ class ZhuteroPlugin {
       btn.textContent = "Saving...";
       await saveFramework(this._currentItemKey, framework);
 
-      const hasPdf = await this._itemHasPdfAttachment(item);
-      if (hasPdf) {
-        btn.textContent = "Annotating...";
-        await removeZhuteroAnnotations(item);
-        await createAnnotationsForFramework(framework, item);
-      }
+      btn.textContent = "Annotating...";
+      await removeZhuteroAnnotations(item);
+      await createAnnotationsForFramework(framework, item);
 
       if (this._panelBody) {
         await this._renderPanel(this._panelBody, item);
@@ -810,7 +765,7 @@ class ZhuteroPlugin {
       btn.textContent = "Imported!";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1500);
     } catch (e) {
-      Zotero.log(`[Zhutero] Import JSON error: ${e.message}\n${e.stack || ""}`, "error");
+      Zotero.log(`[Zhutero] Import JSON error: ${e.message}`, "error");
       btn.textContent = "Import failed";
       setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2000);
     }
