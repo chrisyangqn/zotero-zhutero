@@ -277,37 +277,72 @@ class ZhuteroPlugin {
 
   // ── Generate ──
 
+  async _itemHasPdfAttachment(item) {
+    if (item.isAttachment()) {
+      return item.attachmentContentType === "application/pdf";
+    }
+    const ids = item.getAttachments();
+    for (const aid of ids) {
+      const att = Zotero.Items.get(aid);
+      if (att?.attachmentContentType === "application/pdf") return true;
+    }
+    return false;
+  }
+
   async _handleGenerate(doc, item, btn) {
     const originalText = btn.textContent;
     btn.textContent = "Generating...";
     btn.disabled = true;
+    const tStart = Date.now();
+    Zotero.debug(`[Zhutero] === Generate START item=${item.key} title="${item.getDisplayTitle?.()?.slice(0, 60) || ""}" ===`);
 
     try {
+      btn.textContent = "Extracting text...";
+      const t1 = Date.now();
       const fullText = await getItemFullText(item.id);
+      Zotero.debug(`[Zhutero] Phase 1/4 text extracted in ${Date.now() - t1}ms (${fullText?.length || 0}c)`);
       if (!fullText || fullText.length < 100) {
-        throw new Error("No text content found. Please index the PDF first.");
+        throw new Error("No text content found. Please index the document first.");
       }
 
+      const t2 = Date.now();
       const { framework } = await generateFramework(
         fullText, chatCompletion,
         (msg) => { btn.textContent = msg; }
       );
+      Zotero.debug(`[Zhutero] Phase 2/4 framework generated in ${Date.now() - t2}ms`);
 
       this._framework = framework;
 
-      // Create colored PDF annotations for each framework node
-      btn.textContent = "Creating annotations...";
-      await removeZhuteroAnnotations(item);
-      await createAnnotationsForFramework(framework, item);
+      // PDF annotations: skip for non-PDF (EPUB) attachments
+      const t3 = Date.now();
+      const hasPdf = await this._itemHasPdfAttachment(item);
+      if (hasPdf) {
+        btn.textContent = "Cleaning old annotations...";
+        await removeZhuteroAnnotations(item);
+        await createAnnotationsForFramework(
+          framework, item,
+          (msg) => { btn.textContent = msg; }
+        );
+        Zotero.debug(`[Zhutero] Phase 3/4 annotations done in ${Date.now() - t3}ms`);
+      } else {
+        Zotero.debug(`[Zhutero] Phase 3/4 skipped (no PDF, EPUB-only)`);
+      }
 
+      const t4 = Date.now();
+      btn.textContent = "Saving...";
       await saveFramework(this._currentItemKey, framework);
+      Zotero.debug(`[Zhutero] Phase 4/4 saved in ${Date.now() - t4}ms`);
+
+      Zotero.debug(`[Zhutero] === Generate DONE total ${Date.now() - tStart}ms ===`);
 
       // Full re-render to add view toggle
       if (this._panelBody) {
         await this._renderPanel(this._panelBody, item);
       }
     } catch (e) {
-      Zotero.log(`[Zhutero] Error: ${e.message}`, "error");
+      Zotero.debug(`[Zhutero] === Generate FAILED after ${Date.now() - tStart}ms: ${e.message} ===`);
+      Zotero.log(`[Zhutero] Error: ${e.message}\n${e.stack || ""}`, "error");
       const content = doc.getElementById("zt-content");
       if (content) content.innerHTML = `<div class="zt-error">${e.message}</div>`;
       btn.textContent = originalText;

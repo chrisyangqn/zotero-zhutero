@@ -39,7 +39,8 @@ Return ONLY valid JSON with this exact structure:
 }
 
 Rules:
-- "page" must correspond to page numbers in the source text (shown as "=== PAGE N ===")
+- "page" must correspond to the marker number in the source text. Markers look like
+  "=== PAGE N ===" (PDFs) or "=== CHAPTER N: <title> ===" (EPUBs). Use N either way.
 - "quotes" text MUST be copied VERBATIM from the source — exact characters, exact spacing, exact punctuation
 - For chapter/section headings, include the full heading line as a quote with type "heading"
 - For arguments, include 1-2 key sentences as quotes with type "content"
@@ -48,6 +49,7 @@ Rules:
 - Be thorough — capture all chapters/sections and key arguments
 - Keep summaries concise (1-2 sentences)
 - For academic papers: abstract → introduction → methodology → results → discussion → conclusion
+- For books (EPUB): each top-level node is typically a chapter; arguments/subpoints map to sections inside chapters
 - CRITICAL: Output must be valid JSON. Escape all double quotes inside strings with backslash. Do not use unescaped newlines inside string values.`;
 
 /**
@@ -125,18 +127,31 @@ function parseLLMJson(text) {
  * @returns {Promise<{ framework: object, usage: object }>}
  */
 async function generateFramework(fullText, chatCompletion, onProgress) {
+  Zotero.debug(`[Zhutero/FW] generateFramework: input=${fullText.length}c`);
   if (onProgress) onProgress("Sending to LLM...");
 
+  const tLLM = Date.now();
   const { text, usage } = await chatCompletion(
     FRAMEWORK_PROMPT,
     `Generate a reading framework for this document. The text below has page numbers marked as "=== PAGE N ===".\n\n${fullText}`,
     { maxTokens: 16000 }
   );
+  Zotero.debug(`[Zhutero/FW] LLM finished in ${Date.now() - tLLM}ms`);
 
   if (onProgress) onProgress("Parsing response...");
 
+  const tParse = Date.now();
   const framework = parseLLMJson(text);
+  Zotero.debug(`[Zhutero/FW] Parsed in ${Date.now() - tParse}ms ` +
+    `nodes=${countNodes(framework)} title="${framework?.title?.slice(0, 60) || ""}"`);
   return { framework, usage };
+}
+
+function countNodes(fw) {
+  let n = 0;
+  function walk(node) { n++; if (node.children) for (const c of node.children) walk(c); }
+  if (fw?.children) for (const c of fw.children) walk(c);
+  return n;
 }
 
 /**
@@ -145,40 +160,115 @@ async function generateFramework(fullText, chatCompletion, onProgress) {
  * @param {number} itemID
  * @returns {Promise<string>}
  */
+/**
+ * Extract per-chapter text from an EPUB attachment with chapter markers.
+ * Uses Zotero's internal EPUB.mjs module to walk spine items in reading order.
+ * @param {Zotero.Item} attachment
+ * @returns {Promise<string>}
+ */
+async function getEpubFullText(attachment) {
+  const tStart = Date.now();
+  const tPath = Date.now();
+  const path = await attachment.getFilePathAsync();
+  Zotero.debug(`[Zhutero/Text] EPUB getFilePath ${Date.now() - tPath}ms path=${path ? "ok" : "null"}`);
+  if (!path) throw new Error("EPUB file not available locally");
+
+  const { EPUB } = ChromeUtils.importESModule("chrome://zotero/content/EPUB.mjs");
+  const epub = new EPUB(path);
+
+  // Try to build href -> TOC label map for nicer chapter labels
+  const tocLabels = new Map();
+  try {
+    const tocResult = await epub.getDocumentByReferenceType("toc");
+    const tocDoc = tocResult?.doc;
+    if (tocDoc) {
+      // EPUB3 nav: <nav epub:type="toc"><ol><li><a href="..."> ... </a>
+      const links = tocDoc.querySelectorAll("a[href]");
+      for (const a of links) {
+        const href = (a.getAttribute("href") || "").split("#")[0];
+        const label = (a.textContent || "").trim();
+        if (href && label && !tocLabels.has(href)) tocLabels.set(href, label);
+      }
+    }
+  } catch (e) {
+    Zotero.debug(`[Zhutero/Text] EPUB TOC parse failed: ${e.message}`);
+  }
+
+  let chapterCount = 0;
+  let totalChars = 0;
+  const chunks = [];
+  try {
+    for await (const { href, doc } of epub.getSectionDocuments()) {
+      if (!doc?.body) continue;
+      const text = (doc.body.innerText || doc.body.textContent || "").trim();
+      if (!text) continue;
+      chapterCount++;
+      const baseHref = (href || "").split("#")[0].split("/").pop() || `chapter-${chapterCount}`;
+      const label = tocLabels.get(baseHref)
+        || tocLabels.get(href)
+        || baseHref.replace(/\.x?html?$/i, "");
+      chunks.push(`=== CHAPTER ${chapterCount}: ${label} ===\n${text}`);
+      totalChars += text.length;
+    }
+  } finally {
+    try { epub.close(); } catch (e) {}
+  }
+
+  Zotero.debug(`[Zhutero/Text] EPUB extracted ${chapterCount} chapters, ${totalChars}c in ${Date.now() - tStart}ms`);
+  if (chapterCount === 0) throw new Error("No readable chapters found in EPUB");
+  return chunks.join("\n\n");
+}
+
 async function getItemFullText(itemID) {
+  Zotero.debug(`[Zhutero/Text] getItemFullText itemID=${itemID}`);
   const item = Zotero.Items.get(itemID);
   if (!item) throw new Error("Item not found");
 
-  // If this is an attachment, use it directly; if parent item, find PDF attachment
+  // If this is an attachment, use it directly; otherwise find PDF or EPUB
   let attachment = item;
   if (!item.isAttachment()) {
     const attachmentIDs = item.getAttachments();
+    let pdfAtt = null, epubAtt = null;
     for (const aid of attachmentIDs) {
       const att = Zotero.Items.get(aid);
-      if (att.attachmentContentType === "application/pdf") {
-        attachment = att;
-        break;
-      }
+      const ct = att.attachmentContentType;
+      if (ct === "application/pdf" && !pdfAtt) pdfAtt = att;
+      else if (ct === "application/epub+zip" && !epubAtt) epubAtt = att;
     }
+    attachment = pdfAtt || epubAtt;
   }
 
   if (!attachment?.isAttachment()) {
-    throw new Error("No PDF attachment found");
+    throw new Error("No PDF or EPUB attachment found");
+  }
+
+  const ct = attachment.attachmentContentType;
+  Zotero.debug(`[Zhutero/Text] Using attachment id=${attachment.id} key=${attachment.key} type=${ct}`);
+
+  if (ct === "application/epub+zip") {
+    return getEpubFullText(attachment);
   }
 
   // Per-page text extraction using Zotero.PDFWorker
-  // getFullText can accept maxPages=1 per call, but that's slow.
-  // Instead, use Zotero's internal PDF processor which returns per-page chars.
   try {
+    const tPath = Date.now();
     const pdfPath = await attachment.getFilePathAsync();
+    Zotero.debug(`[Zhutero/Text] getFilePath ${Date.now() - tPath}ms path=${pdfPath ? "ok" : "null"}`);
     if (pdfPath) {
+      const tRead = Date.now();
       const data = await IOUtils.read(pdfPath);
-      // Use Zotero's internal PDF processor to get per-page text
+      Zotero.debug(`[Zhutero/Text] Read PDF ${Date.now() - tRead}ms size=${(data.byteLength / 1024).toFixed(0)}KB`);
+
+      const tQuery = Date.now();
       const result = await Zotero.PDFWorker._query("getFullText", { buf: data.buffer }, [data.buffer]);
+      Zotero.debug(`[Zhutero/Text] PDFWorker.getFullText ${Date.now() - tQuery}ms ` +
+        `pages=${result?.pageTexts?.length ?? 0}`);
+
       if (result?.pageTexts && result.pageTexts.length > 0) {
-        // pageTexts is an array of strings, one per page
         const pages = result.pageTexts.map((text, i) => `=== PAGE ${i + 1} ===\n${text}`);
-        return pages.join("\n\n");
+        const joined = pages.join("\n\n");
+        Zotero.debug(`[Zhutero/Text] Joined text length=${joined.length}c`);
+        return joined;
       }
       if (result?.text) {
         return result.text;
@@ -234,7 +324,7 @@ async function createAnnotationsForFramework(framework, item, onProgress) {
     }
   }
   if (!attachment) {
-    Zotero.log("[Zhutero] No PDF attachment found for annotations", "warning");
+    Zotero.debug("[Zhutero/Ann] Skipping annotation creation (no PDF attachment — EPUB or other type)");
     return framework;
   }
 
@@ -249,22 +339,25 @@ async function createAnnotationsForFramework(framework, item, onProgress) {
   }
   if (framework.children) for (const c of framework.children) findMaxPage(c);
 
+  Zotero.debug(`[Zhutero/Ann] createAnnotations: maxPage=${maxPage} attachment=${attachment.key}`);
   if (onProgress) onProgress("Reading PDF...");
 
   // Extract per-page character positions from PDF for precise highlighting
-  let pageChars = []; // pageChars[pageIndex] = [{str, x, y, w, h}, ...]
+  let pageChars = [];
   try {
+    const tRead = Date.now();
     const pdfPath = await attachment.getFilePathAsync();
     if (pdfPath) {
       const data = await IOUtils.read(pdfPath);
+      Zotero.debug(`[Zhutero/Ann] PDF read ${Date.now() - tRead}ms size=${(data.byteLength / 1024).toFixed(0)}KB`);
+      const tQuery = Date.now();
       const result = await Zotero.PDFWorker._query(
         "getFullText",
         { buf: data.buffer, maxPages: maxPage },
         [data.buffer]
       );
-      if (result?.pageChars) {
-        pageChars = result.pageChars;
-      }
+      Zotero.debug(`[Zhutero/Ann] PDFWorker chars ${Date.now() - tQuery}ms pages=${result?.pageChars?.length ?? 0}`);
+      if (result?.pageChars) pageChars = result.pageChars;
     }
   } catch (e) {
     Zotero.log("[Zhutero] Could not extract page chars: " + e.message, "warning");
@@ -401,9 +494,13 @@ async function createAnnotationsForFramework(framework, item, onProgress) {
     }
   }
 
+  const matched = tasks.filter(t => t.rects && t.rects[0][0] !== 72).length;
+  Zotero.debug(`[Zhutero/Ann] Tasks=${tasks.length} matched=${matched} fallback=${tasks.length - matched}`);
   if (onProgress) onProgress(`Creating ${tasks.length} annotations...`);
 
   // Single batched transaction — much faster than per-node saveTx
+  const tTx = Date.now();
+  let saved = 0;
   try {
     await Zotero.DB.executeTransaction(async () => {
       for (const t of tasks) {
@@ -425,13 +522,15 @@ async function createAnnotationsForFramework(framework, item, onProgress) {
             String(t.sortIdx).padStart(6, "0") + "|00000";
           await annotation.save();
           t.node.annotationKey = annotation.key;
+          saved++;
         } catch (e) {
           Zotero.log(`[Zhutero] Failed annotation "${t.node.label}": ${e.message}`, "warning");
         }
       }
     });
+    Zotero.debug(`[Zhutero/Ann] Transaction ${Date.now() - tTx}ms saved=${saved}/${tasks.length}`);
   } catch (e) {
-    Zotero.log(`[Zhutero] Transaction failed: ${e.message}`, "error");
+    Zotero.log(`[Zhutero] Transaction failed after ${Date.now() - tTx}ms: ${e.message}`, "error");
   }
 
   return framework;

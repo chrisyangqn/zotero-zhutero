@@ -68,11 +68,25 @@ async function chatCompletion(systemPrompt, userMessage, opts = {}) {
   if (!apiKey) throw new Error("No API key configured.");
   if (!model) throw new Error("No model configured.");
 
-  if (provider === "anthropic") {
-    return anthropicChat(baseUrl, apiKey, model, systemPrompt, userMessage, maxTokens);
-  } else {
-    return openaiChat(baseUrl, apiKey, model, systemPrompt, userMessage, maxTokens);
+  Zotero.debug(`[Zhutero/LLM] → ${provider} model=${model} maxTokens=${maxTokens} ` +
+    `system=${systemPrompt.length}c user=${userMessage.length}c`);
+  const t0 = Date.now();
+
+  let result;
+  try {
+    if (provider === "anthropic") {
+      result = await anthropicChat(baseUrl, apiKey, model, systemPrompt, userMessage, maxTokens);
+    } else {
+      result = await openaiChat(baseUrl, apiKey, model, systemPrompt, userMessage, maxTokens);
+    }
+  } catch (e) {
+    Zotero.debug(`[Zhutero/LLM] ✗ failed after ${Date.now() - t0}ms: ${e.message}`);
+    throw e;
   }
+
+  Zotero.debug(`[Zhutero/LLM] ← ${Date.now() - t0}ms response=${result.text.length}c ` +
+    `tokens=${JSON.stringify(result.usage)}`);
+  return result;
 }
 
 async function anthropicChat(baseUrl, apiKey, model, system, user, maxTokens) {
