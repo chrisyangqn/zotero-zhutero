@@ -1065,15 +1065,23 @@ class ZhuteroPlugin {
 
       if (!reader) return;
 
-      const pageIndex = node.page - 1;
+      // Detect attachment type — EPUB needs spine-href navigation, NOT pageIndex
+      // (pageIndex on EPUB = rendered physical page, not chapter)
+      const att = reader._item;
+      const isEpub = att?.attachmentContentType === "application/epub+zip";
 
-      // Try to find precise text position using reader's internal pdf.js
+      if (isEpub) {
+        await this._navigateEpubToChapter(reader, att, node.page);
+        return;
+      }
+
+      // PDF flow
+      const pageIndex = node.page - 1;
       const searchText = node.quotes?.[0]?.text || node.label || "";
       if (searchText) {
         try {
           const position = await this._findTextPosition(reader, pageIndex, searchText);
           if (position) {
-            // navigate({ position }) scrolls to the rects AND flashes a 2-sec highlight
             reader.navigate({ position });
             return;
           }
@@ -1081,11 +1089,63 @@ class ZhuteroPlugin {
           Zotero.log("[Zhutero] Text position search failed: " + e.message, "warning");
         }
       }
-
-      // Fallback: just jump to the page
       reader.navigate({ pageIndex });
     } catch (e) {
       Zotero.log(`[Zhutero] Navigate error: ${e.message}`, "warning");
+    }
+  }
+
+  /**
+   * Navigate an EPUB reader to the Nth non-empty chapter (1-indexed).
+   * Resolves the spine href via EPUB.mjs (matching getEpubFullText's
+   * counting), then asks the reader to jump there.
+   */
+  async _navigateEpubToChapter(reader, attachment, chapterNum) {
+    // Cache per-attachment so we don't re-open the EPUB on every click
+    this._epubSpineCache = this._epubSpineCache || new Map();
+    let hrefList = this._epubSpineCache.get(attachment.key);
+
+    if (!hrefList) {
+      hrefList = [];
+      try {
+        const path = await attachment.getFilePathAsync();
+        if (!path) throw new Error("EPUB file not available");
+        const { EPUB } = ChromeUtils.importESModule("chrome://zotero/content/EPUB.mjs");
+        const epub = new EPUB(path);
+        try {
+          for await (const { href, doc } of epub.getSectionDocuments()) {
+            if (!doc?.body) continue;
+            const text = (doc.body.innerText || doc.body.textContent || "").trim();
+            if (!text) continue;
+            hrefList.push(href);
+          }
+        } finally {
+          try { epub.close(); } catch (e) {}
+        }
+        this._epubSpineCache.set(attachment.key, hrefList);
+        Zotero.debug(`[Zhutero/Nav] Built EPUB spine cache: ${hrefList.length} chapters for ${attachment.key}`);
+      } catch (e) {
+        Zotero.log(`[Zhutero] Could not build EPUB spine map: ${e.message}`, "warning");
+        return;
+      }
+    }
+
+    const targetHref = hrefList[chapterNum - 1];
+    if (!targetHref) {
+      Zotero.log(`[Zhutero] No spine href for chapter ${chapterNum} (have ${hrefList.length})`, "warning");
+      return;
+    }
+
+    Zotero.debug(`[Zhutero/Nav] EPUB navigate: chapter ${chapterNum} → ${targetHref}`);
+    // Try several navigation forms; Zotero's EPUB reader is forgiving
+    try {
+      reader.navigate({ location: { href: targetHref } });
+    } catch (e) {
+      try {
+        reader.navigate({ href: targetHref });
+      } catch (e2) {
+        Zotero.log(`[Zhutero] EPUB navigate failed: ${e.message} / ${e2.message}`, "warning");
+      }
     }
   }
 
