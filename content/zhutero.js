@@ -1180,11 +1180,17 @@ class ZhuteroPlugin {
     }
 
     // Build CFI element path:
-    //   chapter only:  /4/2          (body → chapter section wrapper)
-    //   subsection N:  /4/2/<2*(N+1)>
-    let elementPath = "/4/2";
+    //   chapter only:  /4/2/2/1:0          (body → chapter wrapper → h1 → text)
+    //   subsection N:  /4/2/<2*(N+1)>/2/1:0   (... → subsection wrapper → h2 → text)
+    //
+    // Zotero's EPUB reader needs the CFI to terminate at a text-node
+    // offset (`/N:0`); CFIs that end at an element wrapper (e.g. /4/2/4)
+    // are accepted but don't actually scroll there.
+    let elementPath;
     if (sub.subIndex && sub.subIndex >= 1) {
-      elementPath += `/${2 * (sub.subIndex + 1)}`;
+      elementPath = `/4/2/${2 * (sub.subIndex + 1)}/2/1:0`;
+    } else {
+      elementPath = `/4/2/2/1:0`;
     }
     const cfi = `epubcfi(/6/${2 * (target.spineIndex + 1)}!${elementPath})`;
     Zotero.debug(
