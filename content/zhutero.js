@@ -1071,7 +1071,10 @@ class ZhuteroPlugin {
       const isEpub = att?.attachmentContentType === "application/epub+zip";
 
       if (isEpub) {
-        await this._navigateEpubToChapter(reader, att, node.page);
+        // For subsections (type=argument/subpoint), find their position
+        // within the parent chapter so we can build a deeper CFI.
+        const sub = this._findSubsectionPosition(node);
+        await this._navigateEpubToChapter(reader, att, node.page, sub);
         return;
       }
 
@@ -1096,12 +1099,50 @@ class ZhuteroPlugin {
   }
 
   /**
+   * Locate a node's position in the framework: if it's a subsection
+   * (direct child of a chapter), return {subIndex} where subIndex is
+   * 1-indexed within the chapter. Returns {} for top-level chapter
+   * nodes or nodes not found.
+   */
+  _findSubsectionPosition(targetNode) {
+    if (!this._framework?.children) return {};
+    for (const chapter of this._framework.children) {
+      if (!chapter.children?.length) continue;
+      for (let i = 0; i < chapter.children.length; i++) {
+        if (chapter.children[i] === targetNode) {
+          return { subIndex: i + 1 };
+        }
+        // One more nesting level (sub-sub-points) — fall back to
+        // their parent subsection's position.
+        const grand = chapter.children[i].children;
+        if (grand?.length) {
+          for (let j = 0; j < grand.length; j++) {
+            if (grand[j] === targetNode) {
+              return { subIndex: i + 1 };
+            }
+          }
+        }
+      }
+    }
+    return {};
+  }
+
+  /**
    * Navigate an EPUB reader to the Nth non-empty chapter (1-indexed).
    * Builds a chapter→{href, spineIndex} map matching getEpubFullText's
-   * counting, then issues a CFI navigation: epubcfi(/6/<2*(spine+1)>!).
-   * Zotero's EPUB reader uses `pageNumber` with a CFI string for jumps.
+   * counting, then issues a CFI navigation:
+   *   epubcfi(/6/<2*(spine+1)>!/4/2)              for chapter
+   *   epubcfi(/6/<2*(spine+1)>!/4/2/<2*(N+1)>)    for subsection N
+   *
+   * The /4/2/2*(N+1) path matches the common EPUB structure:
+   *   <body>                ← /4
+   *     <section>           ← /4/2  (chapter wrapper)
+   *       <h1>title</h1>    ← /4/2/2
+   *       <section>...</section>  ← /4/2/4  (subsection 1)
+   *       <section>...</section>  ← /4/2/6  (subsection 2)
+   *       ...
    */
-  async _navigateEpubToChapter(reader, attachment, chapterNum) {
+  async _navigateEpubToChapter(reader, attachment, chapterNum, sub = {}) {
     this._epubSpineCache = this._epubSpineCache || new Map();
     let chapters = this._epubSpineCache.get(attachment.key);
 
@@ -1138,18 +1179,28 @@ class ZhuteroPlugin {
       return;
     }
 
-    // EPUB CFI for spine navigation: /6/N where N = 2*(spineIndex+1).
-    // (Spine itemrefs are at even positions starting from 2.)
-    const cfi = `epubcfi(/6/${2 * (target.spineIndex + 1)}!/4)`;
-    Zotero.debug(`[Zhutero/Nav] EPUB navigate: chapter ${chapterNum} → spine[${target.spineIndex}] (${target.href}) → ${cfi}`);
+    // Build CFI element path:
+    //   chapter only:  /4/2          (body → chapter section wrapper)
+    //   subsection N:  /4/2/<2*(N+1)>
+    let elementPath = "/4/2";
+    if (sub.subIndex && sub.subIndex >= 1) {
+      elementPath += `/${2 * (sub.subIndex + 1)}`;
+    }
+    const cfi = `epubcfi(/6/${2 * (target.spineIndex + 1)}!${elementPath})`;
+    Zotero.debug(
+      `[Zhutero/Nav] EPUB navigate: chapter ${chapterNum}` +
+      (sub.subIndex ? ` sub ${sub.subIndex}` : "") +
+      ` → spine[${target.spineIndex}] (${target.href}) → ${cfi}`
+    );
 
     try {
       reader.navigate({ pageNumber: cfi });
     } catch (e) {
-      // Fallbacks for older Zotero versions
-      try { reader.navigate({ location: { href: target.href } }); }
+      // Fallbacks: chapter-only CFI, then href forms
+      const chapterCfi = `epubcfi(/6/${2 * (target.spineIndex + 1)}!/4/2)`;
+      try { reader.navigate({ pageNumber: chapterCfi }); }
       catch (e2) {
-        try { reader.navigate({ href: target.href }); }
+        try { reader.navigate({ location: { href: target.href } }); }
         catch (e3) {
           Zotero.log(`[Zhutero] EPUB navigate failed: ${e.message} / ${e2.message} / ${e3.message}`, "warning");
         }
