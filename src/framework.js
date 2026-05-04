@@ -209,7 +209,11 @@ async function generateFramework(fullText, chatCompletion, onProgress, onPartial
     chunks, chatCompletion, onProgress, totalUsage,
     /* allChunks */ chunks,
     /* onChapterComplete */ async (node) => {
+      // Insert in chapter-number order — chapters can complete out of
+      // order with concurrency, but the framework should always be
+      // ordered for the partial save / final result.
       framework.children.push(node);
+      framework.children.sort((a, b) => (a.page || 0) - (b.page || 0));
       if (onPartial) {
         try { await onPartial(framework); }
         catch (e) { Zotero.log(`[Zhutero/FW] onPartial error (ignored): ${e.message}`, "warning"); }
@@ -295,34 +299,48 @@ function countFailedChapters(framework) {
  */
 async function processChapters(chunks, chatCompletion, onProgress, totalUsage, allChunks, onChapterComplete) {
   // Pacing: keep request volume under the org's per-minute token budget.
-  // Default Anthropic tier is 30K input tokens / minute.
+  // Default Anthropic tier is 30K input tokens / minute. With CONCURRENCY > 1,
+  // pacing is serialized via a mutex so concurrent workers can't both think
+  // they have budget when they don't.
   const TOKENS_PER_MINUTE_BUDGET = 25000;
+  // Run 2 chapters in parallel — most of each call's time is API latency
+  // (~30s/chapter), so 2-way concurrency cuts wall-clock ~40% without
+  // exceeding rate limits (pacing still serialized).
+  const CONCURRENCY = 2;
   let tokensInWindow = 0;
   let windowStart = Date.now();
+  let pacingMutex = Promise.resolve();
 
-  async function paceBeforeCall(estTokens) {
-    const now = Date.now();
-    if (now - windowStart > 60000) {
-      tokensInWindow = 0;
-      windowStart = now;
-    }
-    if (tokensInWindow + estTokens > TOKENS_PER_MINUTE_BUDGET) {
-      const waitMs = 60000 - (now - windowStart) + 1000;
-      if (waitMs > 0) {
-        Zotero.debug(`[Zhutero/FW] Pacing: would exceed ${TOKENS_PER_MINUTE_BUDGET} tok/min, sleeping ${(waitMs / 1000).toFixed(1)}s`);
-        await new Promise(r => setTimeout(r, waitMs));
+  function paceBeforeCall(estTokens) {
+    // Chain through the mutex so only one worker checks/updates budget at a time
+    pacingMutex = pacingMutex.then(async () => {
+      const now = Date.now();
+      if (now - windowStart > 60000) {
         tokensInWindow = 0;
-        windowStart = Date.now();
+        windowStart = now;
       }
-    }
-    tokensInWindow += estTokens;
+      if (tokensInWindow + estTokens > TOKENS_PER_MINUTE_BUDGET) {
+        const waitMs = 60000 - (now - windowStart) + 1000;
+        if (waitMs > 0) {
+          Zotero.debug(`[Zhutero/FW] Pacing: would exceed ${TOKENS_PER_MINUTE_BUDGET} tok/min, sleeping ${(waitMs / 1000).toFixed(1)}s`);
+          await new Promise(r => setTimeout(r, waitMs));
+          tokensInWindow = 0;
+          windowStart = Date.now();
+        }
+      }
+      tokensInWindow += estTokens;
+    });
+    return pacingMutex;
   }
 
   const total = allChunks.length;
   const indexInAll = new Map(allChunks.map((c, i) => [c.chapterNum, i + 1]));
 
-  const out = [];
-  for (let i = 0; i < chunks.length; i++) {
+  // Worker pool: each worker pulls the next un-claimed chunk index.
+  let nextIdx = 0;
+  const out = new Array(chunks.length);
+
+  async function processOne(i) {
     const c = chunks[i];
     const display = indexInAll.get(c.chapterNum) ?? (i + 1);
     if (onProgress) onProgress(`Chapter ${display}/${total}...`);
@@ -338,7 +356,7 @@ async function processChapters(chunks, chatCompletion, onProgress, totalUsage, a
       node.page = c.chapterNum;
       node.id = `c${c.chapterNum}`;
       node.type = node.type || "chapter";
-      out.push(node);
+      out[i] = node;
       Zotero.debug(`[Zhutero/FW] Chapter ${display} done in ${Date.now() - tCh}ms`);
       if (onChapterComplete) await onChapterComplete(node);
     } catch (e) {
@@ -352,10 +370,24 @@ async function processChapters(chunks, chatCompletion, onProgress, totalUsage, a
         quotes: [],
         children: [],
       };
-      out.push(placeholder);
+      out[i] = placeholder;
       if (onChapterComplete) await onChapterComplete(placeholder);
     }
   }
+
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= chunks.length) return;
+      await processOne(i);
+    }
+  }
+
+  const workers = Array(Math.min(CONCURRENCY, chunks.length))
+    .fill(null)
+    .map(() => worker());
+  await Promise.all(workers);
+
   return out;
 }
 
