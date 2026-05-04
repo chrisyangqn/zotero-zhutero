@@ -2,12 +2,14 @@
 
 /**
  * Build script for Zhutero Zotero plugin.
- * Packages everything into an .xpi file using system zip.
+ * Packages everything into an .xpi file using adm-zip (pure Node, so
+ * the build works on macOS, Linux, AND Windows without depending on a
+ * system `zip` binary).
  */
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const AdmZip = require("adm-zip");
 
 const isDev = process.argv.includes("--dev");
 const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
@@ -53,8 +55,16 @@ const outputPath = path.resolve(buildDir, outputName);
 // Remove old xpi
 if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
 
-// Use system zip (run from project root to preserve directory structure)
-execSync(`zip "${outputPath}" ${files.join(" ")}`, { stdio: "inherit" });
+// Pack with adm-zip — preserves the project-relative directory structure
+// inside the archive, which is what Zotero expects from an .xpi.
+const zip = new AdmZip();
+for (const f of files) {
+  // entryName uses forward slashes so the archive is portable
+  // (Windows file paths get normalized).
+  const entryName = f.split(path.sep).join("/");
+  zip.addLocalFile(f, path.posix.dirname(entryName) === "." ? "" : path.posix.dirname(entryName));
+}
+zip.writeZip(outputPath);
 
 console.log(`\nBuilt: ${outputPath} (${(fs.statSync(outputPath).size / 1024).toFixed(1)} KB)`);
 

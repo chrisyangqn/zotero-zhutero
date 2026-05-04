@@ -17,6 +17,8 @@ AI-powered reading framework for [Zotero 7](https://www.zotero.org/) — turn an
 
 ## Install
 
+Works on **macOS, Windows, and Linux** — anywhere Zotero 7 runs.
+
 1. Download the latest `.xpi` from [Releases](https://github.com/chrisyangqn/zotero-zhutero/releases).
 2. In Zotero: **Tools → Add-ons → ⚙️ → Install Add-on From File…** → pick the `.xpi`.
 3. Restart Zotero.
@@ -50,12 +52,14 @@ Auto-update is set up via `update.json`, so future versions will install on Zote
 
 ## Build from source
 
+Cross-platform — uses [`adm-zip`](https://www.npmjs.com/package/adm-zip) so it doesn't need a system `zip` binary.
+
 ```bash
-npm install      # only adm-zip + esbuild for build script
+npm install      # adm-zip + esbuild
 node build.js    # produces build/zhutero-VERSION.xpi
 ```
 
-To install the dev build, drop the produced `.xpi` into Zotero via Install From File.
+Works the same on macOS, Windows (PowerShell or cmd), and Linux. To install the dev build, drop the produced `.xpi` into Zotero via Install From File.
 
 ## Stack
 
@@ -87,6 +91,8 @@ Pig-nose icon: [Twemoji](https://github.com/jdecked/twemoji) by Twitter, license
 - **Import / Export JSON**：可以在外部手工编辑 framework 再导入，或在不同 library 间分享。
 
 ## 安装
+
+支持 **macOS、Windows 和 Linux** —— Zotero 7 能跑的平台都可以。
 
 1. 从 [Releases](https://github.com/chrisyangqn/zotero-zhutero/releases) 下载最新 `.xpi`。
 2. Zotero 里：**Tools → Add-ons → ⚙️ → Install Add-on From File…** → 选 `.xpi`。
@@ -121,12 +127,14 @@ Pig-nose icon: [Twemoji](https://github.com/jdecked/twemoji) by Twitter, license
 
 ## 从源码构建
 
+跨平台 —— 用 [`adm-zip`](https://www.npmjs.com/package/adm-zip) 纯 Node 打包，不依赖系统 `zip` 命令。
+
 ```bash
-npm install      # 只装 adm-zip + esbuild（build script 需要）
+npm install      # adm-zip + esbuild
 node build.js    # 生成 build/zhutero-VERSION.xpi
 ```
 
-装方法和 release 版本一样：Install Add-on From File 选生成的 `.xpi`。
+macOS、Windows（PowerShell 或 cmd）、Linux 都可以一样跑。装方法和 release 版本一样：Install Add-on From File 选生成的 `.xpi`。
 
 ## 技术栈
 
