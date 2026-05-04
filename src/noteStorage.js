@@ -53,23 +53,59 @@ function findFrameworkNote(item) {
  */
 function parseFrameworkFromNoteHTML(html) {
   if (!html || !html.includes(FRAMEWORK_MARKER_ATTR)) return null;
+
   // Match: <div data-zhutero-framework="1" ...>JSON</div>
-  // Use a permissive regex that tolerates attribute order and whitespace.
+  // Permissive about attribute order/whitespace. The note may have been
+  // round-tripped through Zotero's note editor or Better Notes, which can
+  // tweak quotes, attribute order, and whitespace.
   const re = /<div\b[^>]*data-zhutero-framework[^>]*>([\s\S]*?)<\/div>/i;
   const m = html.match(re);
-  if (!m) return null;
-  let inner = m[1].trim();
-  // Decode common HTML entities back to their chars
+  if (!m) {
+    Zotero.debug(`[Zhutero/Note] Marker present but regex didn't match (len=${html.length})`);
+    return null;
+  }
+
+  let inner = (m[1] || "").trim();
+  // Decode common HTML entities back to their chars. Use a single sweep
+  // (numeric entity support too: &#34; &#x22; etc.) — order matters: &amp;
+  // last so we don't double-decode entities that contained literal &.
   inner = inner
     .replace(/&quot;/g, '"')
+    .replace(/&#0*34;/g, '"')
+    .replace(/&#x0*22;/gi, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&#0*39;/g, "'")
+    .replace(/&apos;/g, "'")
     .replace(/&lt;/g, "<")
+    .replace(/&#0*60;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&#0*62;/g, ">")
+    .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&");
+
+  // Sanity: a real framework JSON starts with { and ends with }. If not,
+  // the note has probably been mangled by some external editor — bail
+  // quietly with a diagnostic instead of feeding garbage to JSON.parse
+  // (which would throw a raw SyntaxError visible in Browser Console).
+  if (inner[0] !== "{" || inner[inner.length - 1] !== "}") {
+    Zotero.debug(
+      `[Zhutero/Note] Hidden block doesn't look like JSON ` +
+      `(starts="${inner.slice(0, 20)}" ends="${inner.slice(-20)}" len=${inner.length})`
+    );
+    return null;
+  }
+
   try {
     return JSON.parse(inner);
   } catch (e) {
-    Zotero.log(`[Zhutero/Note] Failed to parse framework JSON: ${e.message}`, "warning");
+    // Last-resort log — include a snippet so we can diagnose. Use debug
+    // (not log warning) so the surrounding SyntaxError doesn't leak.
+    Zotero.debug(
+      `[Zhutero/Note] JSON.parse failed: ${e.message}\n` +
+      `  prefix: ${inner.slice(0, 80)}\n` +
+      `  near col 10: ${inner.slice(0, 30)}\n` +
+      `  suffix: ${inner.slice(-80)}`
+    );
     return null;
   }
 }
