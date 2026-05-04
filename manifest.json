@@ -1,9 +1,13 @@
 {
   "manifest_version": 2,
   "name": "Zhutero",
-  "version": "1.0.6.8",
+  "version": "1.0.6.9",
   "description": "AI-powered reading framework & summarization for Zotero",
   "author": "qinuoyang",
+  "icons": {
+    "48": "content/icon-64.png",
+    "96": "content/icon-128.png"
+  },
   "applications": {
     "zotero": {
       "id": "zhutero@qinuoyang.com",

@@ -1172,12 +1172,26 @@ class ZhuteroPlugin {
       const annItem = Zotero.Items.get(ann.itemId);
       if (annItem) {
         const pos = JSON.parse(annItem.annotationPosition || "{}");
+        // PDF: pageIndex + rects
         if (pos.pageIndex != null && pos.rects?.length) {
           reader.navigate({ position: pos });
           return;
         }
+        // EPUB: CFI string under pos.value
+        if (typeof pos.value === "string" && pos.value.includes("epubcfi")) {
+          reader.navigate({ pageNumber: pos.value });
+          return;
+        }
       }
-      reader.navigate({ pageIndex: ann.pageIndex });
+      // Fallback: CFI we stored in the framework
+      if (ann.cfi) {
+        reader.navigate({ pageNumber: ann.cfi });
+        return;
+      }
+      // Last resort (PDF only — for EPUB pageIndex=0 just jumps to page 1)
+      if (ann.pageIndex != null) {
+        reader.navigate({ pageIndex: ann.pageIndex });
+      }
     } catch (e) {
       Zotero.log(`[Zhutero] Navigate annotation error: ${e.message}`, "warning");
     }
