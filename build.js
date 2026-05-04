@@ -21,6 +21,7 @@ const include = [
   "prefs.js",
   "content/zhutero.js",
   "content/zhutero.css",
+  "content/icon.svg",
   "content/preferences.xhtml",
   "content/prefs.js",
   "src/llm.js",

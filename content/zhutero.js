@@ -190,11 +190,11 @@ class ZhuteroPlugin {
       pluginID: this.id,
       header: {
         l10nID: "zhutero-tab-label",
-        icon: "chrome://zotero/skin/16/universal/book.svg",
+        icon: "chrome://zhutero/content/icon.svg",
       },
       sidenav: {
         l10nID: "zhutero-tab-label",
-        icon: "chrome://zotero/skin/16/universal/book.svg",
+        icon: "chrome://zhutero/content/icon.svg",
       },
       onRender: ({ body, item }) => this._renderPanel(body, item),
       onItemChange: ({ body, item }) => this._renderPanel(body, item),

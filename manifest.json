@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zhutero",
-  "version": "1.0.6.7",
+  "version": "1.0.6.8",
   "description": "AI-powered reading framework & summarization for Zotero",
   "author": "qinuoyang",
   "applications": {
