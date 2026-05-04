@@ -500,7 +500,32 @@ class ZhuteroPlugin {
     return false;
   }
 
+  // Returns true if API key is configured. If not, shows a friendly
+  // dialog telling the user where to set it and returns false.
+  _ensureApiConfigured() {
+    let apiKey = "";
+    try {
+      const prefs = Components.classes["@mozilla.org/preferences-service;1"]
+        .getService(Components.interfaces.nsIPrefBranch);
+      apiKey = (prefs.getStringPref("extensions.zhutero.apiKey", "") || "").trim();
+    } catch (e) { /* fall through */ }
+    if (apiKey) return true;
+
+    const win = Zotero.getMainWindow();
+    Services.prompt.alert(
+      win,
+      "Zhutero — API key required",
+      "No API key configured.\n\n" +
+      "Open Edit → Preferences → Zhutero, choose your provider " +
+      "(Anthropic / OpenAI / custom), and paste your API key. " +
+      "Then click Generate again."
+    );
+    return false;
+  }
+
   async _handleGenerate(doc, item, btn, mode = "full") {
+    if (!this._ensureApiConfigured()) return;
+
     const originalText = btn.textContent;
     btn.textContent = "Generating...";
     btn.disabled = true;
