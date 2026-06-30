@@ -33,6 +33,7 @@ const include = [
   "src/storage.js",
   "src/noteStorage.js",
   "src/userAnnotations.js",
+  "src/httpEndpoint.js",
   "locale/en-US/zhutero.ftl",
   "locale/zh-CN/zhutero.ftl",
 ];

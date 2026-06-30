@@ -10,6 +10,7 @@
 /* globals getFramework, saveFramework, getNotes, saveNote, deleteFramework */
 /* globals loadUserAnnotations, groupAnnotationsByNode */
 /* globals findFrameworkNote, loadFrameworkFromNote, saveFrameworkToNote, attachHighlightToFramework, removeHighlightFromFramework, migrateFromLegacyStorage */
+/* globals registerZhuteroHttp, unregisterZhuteroHttp */
 
 class ZhuteroPlugin {
   constructor() {
@@ -43,6 +44,7 @@ class ZhuteroPlugin {
 
     await this._registerPane();
     this._registerAnnotationObserver();
+    try { registerZhuteroHttp(); } catch (e) { Zotero.log("[Zhutero] HTTP endpoint registration failed: " + e.message, "warning"); }
     Zotero.log("[Zhutero] Plugin initialized v" + version);
   }
 
@@ -1530,6 +1532,7 @@ class ZhuteroPlugin {
   }
 
   destroy() {
+    try { unregisterZhuteroHttp(); } catch (e) {}
     try { Zotero.ItemPaneManager.unregisterSection(this._tabId); } catch (e) {}
     if (this._observerID) {
       try { Zotero.Notifier.unregisterObserver(this._observerID); } catch (e) {}
